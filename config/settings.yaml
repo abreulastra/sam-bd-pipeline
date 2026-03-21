@@ -1,5 +1,5 @@
-worsheet_title: Opportunties
-runlog_tittle: RunLog
+worksheet_title: Opportunities
+runlog_title: RunLog
 
 agency_codes:
   - "011"
@@ -60,3 +60,5 @@ exclude_naics:
   - "541110"
   - "561621"
   - "561920"
+  - "561599"
+  - "561510"

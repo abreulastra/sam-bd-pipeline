@@ -1,3 +1,4 @@
+
 import json
 import os
 import random
@@ -8,6 +9,7 @@ import gspread
 import pandas as pd
 import requests
 import yaml
+from dotenv import load_dotenv
 from google.oauth2.service_account import Credentials
 
 
@@ -159,6 +161,7 @@ def build_row(item, agency_code, api_pulled_at_utc):
 
 
 def main():
+    load_dotenv()
     config = load_config()
 
     api_key = get_env("SAM_API_KEY")
