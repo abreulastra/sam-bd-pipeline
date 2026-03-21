@@ -1,0 +1,7 @@
+.venv/
+*.pyc
+.env
+.DS_Store
+.ipynb_checkpoints/
+secrets/
+service-account.json
