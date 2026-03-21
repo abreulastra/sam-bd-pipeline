@@ -3,7 +3,7 @@ name: Collect SAM Opportunities
 on:
   workflow_dispatch:
   schedule:
-    - cron: "15 11 * * 1-5"
+    - cron: '15 11 * * 1-5'
 
 jobs:
   collect:
@@ -16,7 +16,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: '3.11'
 
       - name: Install dependencies
         run: |
