@@ -6,6 +6,7 @@ from dotenv import load_dotenv
 
 from collect_sam import build_params, build_row, fetch_page
 from config import get_env, load_config
+from filters import passes_naics_filter
 from sheets_client import (
     build_gspread_client,
     ensure_headers,
@@ -52,6 +53,7 @@ def main():
     days_back = int(config["days_back"])
     limit = int(config["limit"])
     max_records = int(config["max_records"])
+    exclude_naics = set(config["exclude_naics"])
     keyword = os.getenv("KEYWORDS") or None
 
     gc = build_gspread_client()
@@ -100,6 +102,10 @@ def main():
             for item in items:
                 notice_id = str(item.get("noticeId", "") or "").strip()
                 if not notice_id or notice_id in existing_ids:
+                    continue
+
+                naics = str(item.get("naicsCode", "") or "").strip()
+                if not passes_naics_filter(naics, exclude_naics):
                     continue
 
                 row_dict = build_row(item, agency_code, api_pulled_at_utc)
