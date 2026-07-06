@@ -11,7 +11,7 @@ logger = logging.getLogger(__name__)
 
 # Links to skip — navigation, social, account management, etc.
 _SKIP_HREF_PATTERNS = re.compile(
-    r"(developmentaid\.(org|info)/(login|register|account|settings|unsubscribe|about|contact|home|news|blog)|"
+    r"(developmentaid\.(org|info)/(login|register|account|settings|unsubscribe|about|contact|home|news|blog|organizations)|"
     r"linkedin\.com|twitter\.com|facebook\.com|instagram\.com|"
     r"mailto:|#|javascript:|"
     r"developmentaid\.(org|info)/?$)",
@@ -52,9 +52,12 @@ def parse_opportunities(html: str, subject: str) -> list[dict]:
     results = []
     seen_urls = set()
 
-    # Try to find the "Open" section first; fall back to full soup
+    # Try to find the "Open" section; only use it if it actually contains opp links
     open_section = _find_open_section(soup)
-    search_root = open_section if open_section else soup
+    if open_section and open_section.find("a", href=_OPP_HREF_PATTERN):
+        search_root = open_section
+    else:
+        search_root = soup
 
     for a in search_root.find_all("a", href=True):
         href = a["href"].strip()

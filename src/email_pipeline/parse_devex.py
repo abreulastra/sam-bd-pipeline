@@ -4,23 +4,31 @@ Extracts opportunity titles and URLs from the HTML body.
 """
 import logging
 import re
+from urllib.parse import unquote
 
 from bs4 import BeautifulSoup
 
 logger = logging.getLogger(__name__)
 
-# Devex links to skip — navigation, social, unsubscribe, etc.
-_SKIP_HREF_PATTERNS = re.compile(
-    r"(devex\.com/(home|jobs|news|people|organizations|funding|pro|user|account|unsubscribe|settings)|"
-    r"linkedin\.com|twitter\.com|facebook\.com|instagram\.com|"
-    r"mailto:|#|javascript:|"
-    r"devex\.com/?$)",
+# Devex wraps links through track.pstmrk.it — we decode the embedded URL
+_TRACKING_PATTERN = re.compile(r"track\.pstmrk\.it/\w+/([^?#\s]+)", re.IGNORECASE)
+
+# After decoding, skip navigation/social/management links
+_SKIP_DECODED_PATTERNS = re.compile(
+    r"devex\.com/(home|jobs|news|people|organizations|pro|user|account|unsubscribe|settings)"
+    r"|devex\.zendesk"
+    r"|linkedin\.com|twitter\.com|facebook\.com|instagram\.com|servedbyadbutler"
+    r"|mailto:|#|javascript:"
+    r"|devex\.com/?\?access_key"
+    r"|funding/r\?access_key"
+    r"|filter%5Btype%5D|filter\[type\]",
     re.IGNORECASE,
 )
 
-# Devex opportunity links typically contain /opportunity/ or /funding/
-_OPP_HREF_PATTERN = re.compile(
-    r"devex\.com/(en/)?(opportunity|funding|news|contract|tenders|grants)/",
+# Skip generic labels
+_GENERIC_TEXT = re.compile(
+    r"^(read more|view|apply|details|more|learn more|click here|see all|"
+    r"manage your alert|create new alert|funding search|here|www\.devex\.com)$",
     re.IGNORECASE,
 )
 
@@ -35,6 +43,14 @@ def parse_alert_name(subject: str) -> str:
     return ""
 
 
+def _decode_tracking_url(href: str) -> str:
+    """Decode a track.pstmrk.it tracking URL to get the real destination."""
+    m = _TRACKING_PATTERN.search(href)
+    if m:
+        return unquote(m.group(1))
+    return href
+
+
 def parse_opportunities(html: str, subject: str) -> list[dict]:
     if not html:
         return []
@@ -42,30 +58,27 @@ def parse_opportunities(html: str, subject: str) -> list[dict]:
     soup = BeautifulSoup(html, "html.parser")
     alert_name = parse_alert_name(subject)
     results = []
-    seen_urls = set()
+    seen_titles = set()
 
     for a in soup.find_all("a", href=True):
         href = a["href"].strip()
+        decoded = _decode_tracking_url(href)
 
-        if _SKIP_HREF_PATTERNS.search(href):
-            continue
-
-        # Accept if it matches the opportunity pattern OR is a long external link
-        # near opportunity content
-        is_opp_link = _OPP_HREF_PATTERN.search(href)
-        if not is_opp_link:
+        if _SKIP_DECODED_PATTERNS.search(decoded):
             continue
 
         title = _extract_title(a)
         if not title or len(title) < _MIN_TITLE_LEN:
             continue
 
-        # Clean tracking parameters
-        clean_url = _clean_url(href)
-
-        if clean_url in seen_urls:
+        if _GENERIC_TEXT.match(title):
             continue
-        seen_urls.add(clean_url)
+
+        # Deduplicate by title since all tracking URLs look similar
+        title_key = title.lower().strip()
+        if title_key in seen_titles:
+            continue
+        seen_titles.add(title_key)
 
         donor = _extract_nearby_donor(a)
         country = _extract_nearby_country(a)
@@ -73,7 +86,7 @@ def parse_opportunities(html: str, subject: str) -> list[dict]:
 
         results.append({
             "opportunityTitle": title,
-            "url": clean_url,
+            "url": decoded,
             "donorClient": donor,
             "countryRegion": country,
             "deadline": deadline,
