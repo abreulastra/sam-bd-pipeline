@@ -3,7 +3,7 @@ name: Email Pipeline (Daily)
 on:
   workflow_dispatch:
   schedule:
-    - cron: '0 22 * * 1-5'  # 6 PM ET (22:00 UTC) Mon–Fri
+    - cron: '0 23 * * 1-5'  # 7 PM ET (23:00 UTC) Mon–Fri
 
 jobs:
   email-pipeline:
