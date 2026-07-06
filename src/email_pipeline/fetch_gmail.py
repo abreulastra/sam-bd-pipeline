@@ -15,17 +15,20 @@ logger = logging.getLogger(__name__)
 
 SCOPES = ["https://www.googleapis.com/auth/gmail.readonly"]
 
-QUERIES = {
-    "devex": "from:alerts@devex.com",
-    "developmentaid": 'from:pipeline@c-230.com "DevelopmentAid"',
-}
+def _build_queries() -> dict:
+    da_sender = os.environ.get("DEVELOPMENTAID_SENDER", "")
+    da_query = f'from:{da_sender} "DevelopmentAid"' if da_sender else '"DevelopmentAid"'
+    return {
+        "devex": "from:alerts@devex.com",
+        "developmentaid": da_query,
+    }
 
 
 def build_gmail_client():
     client_id = os.environ.get("GMAIL_CLIENT_ID")
     client_secret = os.environ.get("GMAIL_CLIENT_SECRET")
     refresh_token = os.environ.get("GMAIL_REFRESH_TOKEN")
-    account = os.environ.get("GMAIL_ACCOUNT_EMAIL", "rabreu@c-230.com")
+    account = os.environ.get("GMAIL_ACCOUNT_EMAIL", "")
 
     if not all([client_id, client_secret, refresh_token]):
         raise ValueError(
@@ -129,10 +132,11 @@ def fetch_emails(days: int = 7, limit: int | None = None, source_filter: str = "
     service = build_gmail_client()
     results = []
 
+    queries = _build_queries()
     sources = ["devex", "developmentaid"] if source_filter == "all" else [source_filter]
 
     for source in sources:
-        query = QUERIES[source]
+        query = queries[source]
         messages = search_messages(service, query, days, limit)
         logger.info("Found %d %s messages", len(messages), source)
 

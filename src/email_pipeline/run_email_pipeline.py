@@ -115,7 +115,7 @@ def main():
     load_dotenv()
 
     args = parse_args()
-    account = os.environ.get("GMAIL_ACCOUNT_EMAIL", "rabreu@c-230.com")
+    account = os.environ.get("GMAIL_ACCOUNT_EMAIL", "")
 
     logger.info("Email pipeline starting")
     logger.info("Gmail account: %s", account)

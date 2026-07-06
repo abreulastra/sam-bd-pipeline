@@ -1,5 +1,5 @@
 """
-Parser for DevelopmentAid alert emails forwarded via pipeline@c-230.com.
+Parser for DevelopmentAid alert emails.
 Extracts opportunities from the Open section of the HTML body.
 """
 import logging
@@ -14,9 +14,7 @@ _SKIP_HREF_PATTERNS = re.compile(
     r"(developmentaid\.(org|info)/(login|register|account|settings|unsubscribe|about|contact|home|news|blog)|"
     r"linkedin\.com|twitter\.com|facebook\.com|instagram\.com|"
     r"mailto:|#|javascript:|"
-    r"developmentaid\.(org|info)/?$|"
-    r"socios\.c-230\.com|"
-    r"c-230\.com/?$)",
+    r"developmentaid\.(org|info)/?$)",
     re.IGNORECASE,
 )
 
