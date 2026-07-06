@@ -1,165 +1,267 @@
 # SAM BD Pipeline
 
-A lightweight pipeline that pulls federal contracting opportunities from **SAM.gov**, filters them based on business development criteria, and writes results to a Google Sheet.
+Automated business development pipeline for **C230 Consulting Group**.
 
-This tool is designed to support **business development workflows** by automatically surfacing relevant opportunities from key U.S. government agencies.
+Pulls federal contracting opportunities from **SAM.gov** and email alerts from **Devex** and **DevelopmentAid**, filters and de-duplicates them, and writes results to a shared **Google Sheet** for daily review.
 
----
-
-## Overview
-
-The pipeline:
-
-- Queries the **SAM.gov Opportunities API**
-- Filters opportunities by:
-  - agency (e.g., State, USAID, DOL, DFC)
-  - NAICS codes (e.g., services starting with `5`)
-  - custom exclusions
-- De-duplicates results
-- Writes new opportunities to a Google Sheet
-- Logs each run for traceability
-- Runs locally or via **GitHub Actions (automated)**
+Opportunity scoring and analysis is handled separately by the [`sam-bd-agent`](https://github.com/abreulastra/sam-bd-agent) repository.
 
 ---
 
-## Key Features
+## What it does
 
-- ✅ Automated SAM.gov data extraction  
-- ✅ Customizable filtering logic (agency, NAICS, keywords)  
-- ✅ Google Sheets integration  
-- ✅ De-duplication across runs  
-- ✅ Run logging  
-- ✅ GitHub Actions automation (scheduled + manual runs)  
+| Source | Tab | Schedule |
+|---|---|---|
+| SAM.gov Opportunities API | `Opportunities` | Weekdays, 11:15 AM UTC |
+| Devex email alerts | `Pipeline` | Weekdays, 12:00 PM UTC |
+| DevelopmentAid email alerts | `Pipeline` | Weekdays, 12:00 PM UTC |
 
 ---
 
 ## Architecture
 
-```text
-SAM.gov API
-     ↓
-Python pipeline (src/main.py)
-     ↓
-Google Sheets (Opportunities + RunLog)
-     ↓
-(Optional) Future: scoring / email alerts / LLM analysis
-Quick Start
-1. Clone the repository
+```
+SAM.gov API  ──────────────────→  src/main.py
+                                        ↓
+                               Google Sheet: Opportunities tab
+
+Gmail (Devex + DevelopmentAid) →  src/email_pipeline/
+                                        ↓
+                               Google Sheet: Pipeline tab
+                                        ↓
+                          (analyzed separately by sam-bd-agent)
+```
+
+---
+
+## Repository Structure
+
+```
+sam-bd-pipeline/
+├── src/
+│   ├── main.py                        # SAM.gov pipeline entry point
+│   ├── collect_sam.py                 # SAM.gov API client
+│   ├── filters.py                     # NAICS filtering logic
+│   ├── sheets_client.py               # Google Sheets helpers (shared)
+│   ├── config.py                      # Config and env loader
+│   ├── utils.py                       # Utilities
+│   └── email_pipeline/
+│       ├── run_email_pipeline.py      # Email pipeline entry point (CLI)
+│       ├── fetch_gmail.py             # Gmail API client
+│       ├── parse_devex.py             # Devex HTML parser
+│       ├── parse_developmentaid.py    # DevelopmentAid HTML parser
+│       ├── normalize.py               # Deduplication and language detection
+│       └── write_pipeline_sheet.py    # Writes to Pipeline tab
+├── config/
+│   └── settings.yaml                  # SAM.gov pipeline configuration
+├── tests/
+│   └── test_parsers.py                # Parser unit tests (14 tests)
+├── .github/workflows/
+│   ├── collect.yml                    # SAM.gov daily workflow
+│   ├── pipeline_email_daily.yml       # Email pipeline daily workflow
+│   └── keep-alive.yml                 # Prevents GitHub disabling scheduled jobs
+├── .env.example                       # Environment variable template
+└── requirements.txt
+```
+
+---
+
+## Quick Start
+
+### 1. Clone and set up
+
+```bash
 git clone https://github.com/abreulastra/sam-bd-pipeline.git
 cd sam-bd-pipeline
-2. Create virtual environment
-python3 -m venv .venv
+python3.11 -m venv .venv
 source .venv/bin/activate
-3. Install dependencies
 pip install -r requirements.txt
-4. Configure environment
+```
 
-Create a .env file:
+### 2. Configure environment
 
-SAM_API_KEY=your_sam_api_key
-SHEET_URL=your_google_sheet_url
-GOOGLE_SERVICE_ACCOUNT_JSON={"type":"service_account", ...}
-5. Run locally
+```bash
+cp .env.example .env
+# Edit .env and fill in your credentials
+```
+
+### 3. Run the SAM.gov pipeline
+
+```bash
 python src/main.py
-Setup (Detailed)
+```
 
-This project requires:
+### 4. Run the email pipeline
 
-SAM.gov API key
+```bash
+# Dry run — searches Gmail and prints results without writing to Sheets
+python -m src.email_pipeline.run_email_pipeline --dry-run
 
-Google Sheet
+# Real run — writes new rows to the Pipeline tab
+python -m src.email_pipeline.run_email_pipeline --days 1
 
-Google Cloud service account
+# All options
+python -m src.email_pipeline.run_email_pipeline --help
+```
 
-👉 Full setup guide: docs/setup.md
+**CLI flags:**
 
-Automation (GitHub Actions)
+| Flag | Default | Description |
+|---|---|---|
+| `--days` | `7` | Days back to search Gmail |
+| `--dry-run` | off | Print results without writing to Sheets |
+| `--limit` | none | Max emails to process per source |
+| `--source` | `all` | Filter: `devex`, `developmentaid`, or `all` |
 
-The pipeline runs automatically using GitHub Actions.
+---
 
-Trigger modes
+## Environment Variables
 
-Manual:
+Create a `.env` file (never commit this). See `.env.example` for the full template.
 
-GitHub → Actions → Run workflow
+```env
+# SAM.gov
+SAM_API_KEY=SAM-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
+SHEET_URL=https://docs.google.com/spreadsheets/d/YOUR_SHEET_ID/edit
 
-Scheduled:
+# Google Sheets (service account)
+GOOGLE_SERVICE_ACCOUNT_JSON={"type":"service_account","project_id":"..."}
+GOOGLE_SHEET_ID=YOUR_SHEET_ID
 
-Weekdays via cron
+# Gmail OAuth (for email pipeline)
+GMAIL_CLIENT_ID=your_client_id.apps.googleusercontent.com
+GMAIL_CLIENT_SECRET=your_client_secret
+GMAIL_REFRESH_TOKEN=your_refresh_token
+GMAIL_ACCOUNT_EMAIL=your-email@yourdomain.com
+DEVELOPMENTAID_SENDER=pipeline@yourdomain.com
+```
 
-Required repository secrets
-Name	Description
-SAM_API_KEY	SAM.gov API key
-SHEET_URL	Google Sheet URL
-GOOGLE_SERVICE_ACCOUNT_JSON	Service account credentials
-Configuration
+---
 
-Core configuration is defined in:
+## GitHub Actions Secrets
 
-config/settings.yaml
+Set these in **Settings → Secrets and variables → Actions**:
 
-You can modify:
+| Secret | Used by | Description |
+|---|---|---|
+| `SAM_API_KEY` | SAM.gov workflow | SAM.gov API key |
+| `SHEET_URL` | SAM.gov workflow | Full Google Sheet URL |
+| `GOOGLE_SERVICE_ACCOUNT_JSON` | Both workflows | Service account credentials JSON |
+| `GOOGLE_SHEET_ID` | Email workflow | Sheet ID (the part between /d/ and /edit) |
+| `GMAIL_CLIENT_ID` | Email workflow | OAuth client ID |
+| `GMAIL_CLIENT_SECRET` | Email workflow | OAuth client secret |
+| `GMAIL_REFRESH_TOKEN` | Email workflow | OAuth refresh token |
+| `GMAIL_ACCOUNT_EMAIL` | Email workflow | Gmail account to read |
+| `DEVELOPMENTAID_SENDER` | Email workflow | DevelopmentAid forwarding address |
 
-agency_codes
+---
 
-days_back
+## NAICS Filtering
 
-limit
+Opportunities are **excluded** if their NAICS code falls in these sectors:
 
-max_records
+| Prefix | Sector |
+|---|---|
+| 11 | Agriculture, Forestry, Fishing |
+| 21 | Mining, Oil and Gas |
+| 22 | Utilities |
+| 23 | Construction |
+| 31–33 | Manufacturing |
+| 42 | Wholesale Trade |
+| 44–45 | Retail Trade |
+| 48–49 | Transportation and Warehousing |
+| 52 | Finance and Insurance |
+| 53 | Real Estate |
+| 55 | Management of Companies |
+| 62 | Health Care and Social Assistance |
+| 71 | Arts, Entertainment, Recreation |
+| 72 | Accommodation and Food Services |
 
-exclude_naics
+Additional specific codes (janitorial, telecom, insurance, etc.) are excluded via `config/settings.yaml`.
 
-Use Case
+**Opportunities with no NAICS code are always included** — passed to the agent for review.
 
-This tool is intended for:
+---
 
-consulting firms
+## Google Sheet Structure
 
-development organizations
+Both pipelines write to the same spreadsheet:
 
-BD teams tracking U.S. federal opportunities
+**`Opportunities` tab** — SAM.gov federal contracting opportunities
 
-analysts monitoring procurement pipelines
+**`Pipeline` tab** — Email-sourced opportunities (Devex + DevelopmentAid):
 
-It is especially relevant for:
+| Column | Description |
+|---|---|
+| `source` | `Devex` or `DevelopmentAid` |
+| `emailDate` | Date the alert email was sent |
+| `alertName` | Alert name parsed from email subject |
+| `opportunityTitle` | Extracted opportunity title |
+| `donorClient` | Donor or client if visible |
+| `countryRegion` | Country or region if visible |
+| `opportunityType` | `Tenders & Grants`, `Tender`, `Grant`, or `Opportunity` |
+| `url` | Link to the opportunity |
+| `language` | `English` or `Spanish` (auto-detected) |
+| `duplicateKey` | Deterministic key for deduplication |
+| `pipelineStatus` | Always `New` on first write |
+| `fitScore` / `fitLabel` / `reviewSummary` | Filled later by `sam-bd-agent` |
 
-monitoring & evaluation (M&E / MEL)
+Rows are never overwritten — only appended when the `duplicateKey` is new.
 
-labor and workforce programs
+---
 
-international development
+## Downstream Analysis
 
-migration and humanitarian sectors
+Opportunity scoring, prioritization, and email digests are handled by the separate **[sam-bd-agent](https://github.com/abreulastra/sam-bd-agent)** repository. This pipeline is responsible only for ingestion and deduplication. The Google Sheet is the shared data layer between the two systems.
 
-Roadmap
+---
 
-Planned enhancements:
+## Obtaining Gmail OAuth Credentials
 
-Opportunity scoring (rule-based or ML)
+1. Go to [Google Cloud Console](https://console.cloud.google.com) → your project
+2. Enable the **Gmail API** (APIs & Services → Library)
+3. Go to **Google Auth Platform → Audience** → set to External, add test users
+4. Go to **Clients → Create client** → type: **Desktop app**
+5. Run this locally to generate the refresh token:
 
-Email alerts / digests
+```bash
+python -c "
+from google_auth_oauthlib.flow import InstalledAppFlow
+flow = InstalledAppFlow.from_client_config({
+    'installed': {
+        'client_id': 'YOUR_CLIENT_ID',
+        'client_secret': 'YOUR_CLIENT_SECRET',
+        'redirect_uris': ['http://localhost'],
+        'auth_uri': 'https://accounts.google.com/o/oauth2/auth',
+        'token_uri': 'https://oauth2.googleapis.com/token',
+    }
+}, scopes=['https://www.googleapis.com/auth/gmail.readonly'])
+creds = flow.run_local_server(port=0)
+print('REFRESH TOKEN:', creds.refresh_token)
+"
+```
 
-LLM-based summarization and classification
+6. Sign in as the Gmail account you want to read, approve access, copy the printed token.
 
-Pipeline tracking (win probability, BD funnel)
+---
 
-Multi-source aggregation (beyond SAM.gov)
+## Running Tests
 
-Security Notes
+```bash
+python -m pytest tests/ -v
+```
 
-Do not commit API keys or service account JSON files
+---
 
-Use .env for local development
+## Security Notes
 
-Use GitHub Secrets for automation
+- Never commit `.env`, service account JSON, or OAuth tokens
+- `.env` is in `.gitignore` and will never be committed
+- All secrets are passed via environment variables or GitHub Secrets
+- The keep-alive workflow runs on the 1st of each month to prevent GitHub from disabling scheduled jobs
 
-Rotate keys if exposed
+---
 
-License
+## Author
 
-MIT License
-
-Author
-
-Raúl Abreu
+Raúl Abreu-Lastra — C230 Consulting Group
