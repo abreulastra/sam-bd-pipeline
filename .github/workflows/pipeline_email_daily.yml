@@ -1,0 +1,36 @@
+name: Email Pipeline (Daily)
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 12 * * 1-5'  # 12:00 UTC Mon–Fri
+
+jobs:
+  email-pipeline:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run email pipeline
+        env:
+          GMAIL_CLIENT_ID: ${{ secrets.GMAIL_CLIENT_ID }}
+          GMAIL_CLIENT_SECRET: ${{ secrets.GMAIL_CLIENT_SECRET }}
+          GMAIL_REFRESH_TOKEN: ${{ secrets.GMAIL_REFRESH_TOKEN }}
+          GMAIL_ACCOUNT_EMAIL: ${{ secrets.GMAIL_ACCOUNT_EMAIL }}
+          GOOGLE_SHEET_ID: ${{ secrets.GOOGLE_SHEET_ID }}
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+          SHEET_URL: ${{ secrets.SHEET_URL }}
+        run: |
+          python -m src.email_pipeline.run_email_pipeline --days 7
