@@ -61,6 +61,7 @@ sam-bd-pipeline/
 │   ├── pipeline_email_daily.yml       # Email pipeline daily workflow
 │   └── keep-alive.yml                 # Prevents GitHub disabling scheduled jobs
 ├── .env.example                       # Environment variable template
+├── get_refresh_token.py               # Regenerates GMAIL_REFRESH_TOKEN when it expires
 └── requirements.txt
 ```
 
@@ -183,6 +184,24 @@ Additional specific codes (janitorial, telecom, insurance, etc.) are excluded vi
 
 ---
 
+## Agency Scope
+
+`config/settings.yaml`'s `agency_codes` controls which agencies are queried:
+
+```yaml
+agency_codes: []   # empty = no restriction, search all of SAM.gov
+```
+
+By default this is empty, so the pipeline searches opportunities from every federal agency (subject to the NAICS filtering above). To restrict collection back to a specific set of agencies, list their SAM.gov organization codes:
+
+```yaml
+agency_codes:
+  - "019"   # Department of State
+  - "524"   # Millennium Challenge Corporation
+```
+
+---
+
 ## Google Sheet Structure
 
 Both pipelines write to the same spreadsheet:
@@ -222,26 +241,21 @@ Opportunity scoring, prioritization, and email digests are handled by the separa
 2. Enable the **Gmail API** (APIs & Services → Library)
 3. Go to **Google Auth Platform → Audience** → set to External, add test users
 4. Go to **Clients → Create client** → type: **Desktop app**
-5. Run this locally to generate the refresh token:
+5. Copy the **Client ID** and **Client Secret** shown right after creation (the secret is only shown once — if it's lost, delete the client and create a new one rather than hunting for it later)
+6. Run `get_refresh_token.py` locally to generate the refresh token:
 
 ```bash
-python -c "
-from google_auth_oauthlib.flow import InstalledAppFlow
-flow = InstalledAppFlow.from_client_config({
-    'installed': {
-        'client_id': 'YOUR_CLIENT_ID',
-        'client_secret': 'YOUR_CLIENT_SECRET',
-        'redirect_uris': ['http://localhost'],
-        'auth_uri': 'https://accounts.google.com/o/oauth2/auth',
-        'token_uri': 'https://oauth2.googleapis.com/token',
-    }
-}, scopes=['https://www.googleapis.com/auth/gmail.readonly'])
-creds = flow.run_local_server(port=0)
-print('REFRESH TOKEN:', creds.refresh_token)
-"
+export GMAIL_CLIENT_ID="..."
+export GMAIL_CLIENT_SECRET="..."
+python get_refresh_token.py
 ```
 
-6. Sign in as the Gmail account you want to read, approve access, copy the printed token.
+7. A browser window opens — sign in as the Gmail account the pipeline reads, approve access, copy the printed refresh token.
+8. Update the `GMAIL_CLIENT_ID`, `GMAIL_CLIENT_SECRET`, and `GMAIL_REFRESH_TOKEN` GitHub secrets with the new values.
+
+### Troubleshooting: `RefreshError: invalid_grant` / "Token has been expired or revoked"
+
+This means the stored `GMAIL_REFRESH_TOKEN` is dead — Google revokes refresh tokens after ~6 months of inactivity, or immediately if the OAuth client is deleted, the account's password changes, or access is manually revoked. Fix: repeat steps 6–8 above to mint a new one.
 
 ---
 

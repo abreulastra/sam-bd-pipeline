@@ -1,14 +1,8 @@
 worksheet_title: Opportunities
 runlog_title: RunLog
 
-agency_codes:
-  - "011"
-  - "019"
-  - "077"
-  - "016"
-  - "072"
-  - "524"
-  - "537"
+# Empty = no agency restriction, search all of SAM.gov
+agency_codes: []
 
 days_back: 7
 limit: 200

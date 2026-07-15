@@ -8,15 +8,16 @@ from utils import mmddyyyy, normalize_date, opp_url_from_notice
 API_BASE = "https://api.sam.gov/opportunities/v2/search"
 
 
-def build_params(api_key, posted_from, posted_to, organization_code, limit, offset, keyword=None):
+def build_params(api_key, posted_from, posted_to, limit, offset, organization_code=None, keyword=None):
     params = {
         "api_key": api_key,
         "postedFrom": mmddyyyy(posted_from),
         "postedTo": mmddyyyy(posted_to),
         "limit": limit,
         "offset": offset,
-        "organizationCode": organization_code,
     }
+    if organization_code:
+        params["organizationCode"] = organization_code
     if keyword:
         params["title"] = keyword
     return params
@@ -54,7 +55,7 @@ def build_row(item, agency_code, api_pulled_at_utc):
         "naicsCode": naics,
         "fullParentPathName": item.get("fullParentPathName"),
         "fullParentPathCode": item.get("fullParentPathCode"),
-        "agencyCodeQueried": agency_code,
+        "agencyCodeQueried": agency_code or "ALL",
         "apiPulledAtUTC": api_pulled_at_utc,
         "oppUrl": opp_url_from_notice(notice_id),
     }

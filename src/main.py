@@ -73,9 +73,10 @@ def main():
     existing_ids = get_existing_ids(ws, header, REQUIRED_HEADERS)
 
     new_rows = []
-    per_agency_counts = {code: 0 for code in agency_codes}
+    query_codes = agency_codes or [None]
+    per_agency_counts = {(code or "ALL"): 0 for code in query_codes}
 
-    for agency_code in agency_codes:
+    for agency_code in query_codes:
         offset = 0
         total = None
 
@@ -111,7 +112,7 @@ def main():
                 row_dict = build_row(item, agency_code, api_pulled_at_utc)
                 new_rows.append([row_dict.get(h, "") for h in REQUIRED_HEADERS])
                 existing_ids.add(notice_id)
-                per_agency_counts[agency_code] += 1
+                per_agency_counts[agency_code or "ALL"] += 1
 
                 if len(new_rows) >= max_records:
                     break
@@ -131,7 +132,7 @@ def main():
 
     print(f"Inserted {inserted} new rows at the top." if inserted else "No new rows to insert.")
 
-    agencies_str = ",".join(agency_codes)
+    agencies_str = ",".join(agency_codes) if agency_codes else "ALL"
     notes = "; ".join(f"{k}:{v}" for k, v in per_agency_counts.items() if v > 0) or "no new rows"
 
     log_ws.insert_row(
