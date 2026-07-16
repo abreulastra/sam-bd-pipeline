@@ -5,6 +5,12 @@ on:
   schedule:
     - cron: '30 3 * * 2-6'  # 11:30 PM ET (03:30 UTC next day) Mon–Fri
 
+# Serialize runs — the same sheet-writing pattern that let collect.yml's
+# overlapping runs corrupt the Opportunities header (2026-07-16 incident).
+concurrency:
+  group: email-pipeline
+  cancel-in-progress: false
+
 jobs:
   email-pipeline:
     runs-on: ubuntu-latest

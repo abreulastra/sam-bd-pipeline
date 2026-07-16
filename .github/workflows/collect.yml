@@ -5,6 +5,12 @@ on:
   schedule:
     - cron: '15 11 * * 1-5'
 
+# Serialize runs — overlapping runs raced on the Opportunities sheet's
+# header/dedup check and corrupted it (see 2026-07-16 incident).
+concurrency:
+  group: collect-sam-opportunities
+  cancel-in-progress: false
+
 jobs:
   collect:
     runs-on: ubuntu-latest
