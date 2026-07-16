@@ -50,6 +50,7 @@ def build_row(item, agency_code, api_pulled_at_utc):
         "title": item.get("title"),
         "solicitationNumber": item.get("solicitationNumber"),
         "postedDate": normalize_date(item.get("postedDate")),
+        "deadline": normalize_date(item.get("responseDeadLine")),
         "type": item.get("type"),
         "setAside": item.get("setAside"),
         "naicsCode": naics,

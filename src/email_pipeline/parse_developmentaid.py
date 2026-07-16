@@ -78,9 +78,11 @@ def parse_opportunities(html: str, subject: str) -> list[dict]:
             continue
         seen_urls.add(clean_url)
 
-        donor = _extract_nearby_donor(a)
-        country = _extract_nearby_country(a)
-        deadline, deadline_iso = _extract_nearby_deadline(a)
+        fields = _extract_metadata_fields(a)
+        donor = _lookup(fields, _DONOR_KEYS)
+        country = _lookup(fields, _COUNTRY_KEYS)
+        deadline = _lookup(fields, _DEADLINE_KEYS)
+        deadline_iso = _parse_date_iso(deadline) if deadline else ""
         status = _extract_nearby_status(a)
 
         results.append({
@@ -122,42 +124,43 @@ def _extract_title(a_tag) -> str:
     return text
 
 
-def _extract_nearby_donor(a_tag) -> str:
-    for candidate in _nearby_containers(a_tag):
-        text = candidate.get_text(separator=" ", strip=True)
-        match = re.search(
-            r"(?:donor|client|funder|financiado por|organización)[:\s]+([^\n|•]+)",
-            text, re.IGNORECASE
-        )
-        if match:
-            return match.group(1).strip()[:100]
+_DONOR_KEYS = ("funding agency", "donor", "client", "organización", "financiado por")
+_COUNTRY_KEYS = ("location", "country", "countries", "país", "países", "region", "región")
+_DEADLINE_KEYS = ("deadline", "closing", "cierre", "fecha límite", "fecha limite")
+
+
+def _extract_metadata_fields(a_tag) -> dict:
+    """
+    DevelopmentAid renders each opportunity as an outer <tr> with the title,
+    followed by a sibling <tr> containing a label/value table
+    (Funding agency, Location, Sectors, Budget, Deadline, ...).
+    """
+    outer_table = a_tag.find_parent("table")
+    if outer_table is None:
+        return {}
+    outer_tr = outer_table.find_parent("tr")
+    if outer_tr is None:
+        return {}
+    meta_tr = outer_tr.find_next_sibling("tr")
+    if meta_tr is None:
+        return {}
+
+    fields = {}
+    for row in meta_tr.find_all("tr"):
+        tds = row.find_all("td")
+        if len(tds) < 2:
+            continue
+        label = tds[0].get_text(strip=True).rstrip(":").strip().lower()
+        if label:
+            fields[label] = tds[1].get_text(strip=True)
+    return fields
+
+
+def _lookup(fields: dict, keys: tuple) -> str:
+    for key in keys:
+        if key in fields:
+            return fields[key][:100]
     return ""
-
-
-def _extract_nearby_country(a_tag) -> str:
-    for candidate in _nearby_containers(a_tag):
-        text = candidate.get_text(separator=" ", strip=True)
-        match = re.search(
-            r"(?:country|countries|location|país|países|region|región)[:\s]+([^\n|•]+)",
-            text, re.IGNORECASE
-        )
-        if match:
-            return match.group(1).strip()[:100]
-    return ""
-
-
-def _extract_nearby_deadline(a_tag) -> tuple[str, str]:
-    for candidate in _nearby_containers(a_tag):
-        text = candidate.get_text(separator=" ", strip=True)
-        match = re.search(
-            r"(?:deadline|closing|cierre|fecha límite)[:\s]+([^\n|•]+)",
-            text, re.IGNORECASE
-        )
-        if match:
-            raw = match.group(1).strip()[:60]
-            iso = _parse_date_iso(raw)
-            return raw, iso
-    return "", ""
 
 
 def _extract_nearby_status(a_tag) -> str:

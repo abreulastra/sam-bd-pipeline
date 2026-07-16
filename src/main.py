@@ -28,6 +28,7 @@ REQUIRED_HEADERS = [
     "agencyCodeQueried",
     "apiPulledAtUTC",
     "oppUrl",
+    "deadline",
 ]
 
 LOG_HEADERS = [

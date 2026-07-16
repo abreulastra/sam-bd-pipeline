@@ -74,15 +74,19 @@ def parse_opportunities(html: str, subject: str) -> list[dict]:
         if _GENERIC_TEXT.match(title):
             continue
 
+        # The alert-name header link itself sometimes matches the title filters above
+        if alert_name and title.strip().lower() == alert_name.strip().lower():
+            continue
+
         # Deduplicate by title since all tracking URLs look similar
         title_key = title.lower().strip()
         if title_key in seen_titles:
             continue
         seen_titles.add(title_key)
 
-        donor = _extract_nearby_donor(a)
-        country = _extract_nearby_country(a)
-        deadline = _extract_nearby_deadline(a)
+        title_tr = a.find_parent("tr")
+        status = _extract_status(title_tr)
+        donor, country, deadline = _extract_metadata_rows(title_tr)
 
         results.append({
             "opportunityTitle": title,
@@ -91,7 +95,7 @@ def parse_opportunities(html: str, subject: str) -> list[dict]:
             "countryRegion": country,
             "deadline": deadline,
             "opportunityType": "Tenders & Grants",
-            "status": "",
+            "status": status,
             "alertName": alert_name,
         })
 
@@ -108,56 +112,32 @@ def _extract_title(a_tag) -> str:
     return text
 
 
-def _extract_nearby_donor(a_tag) -> str:
-    # Look in parent or sibling elements for donor/client label patterns
-    parent = a_tag.find_parent()
-    if parent is None:
+def _extract_status(title_tr) -> str:
+    """The status badge (OPEN/FORECAST/...) is the second <td> in the title's own row."""
+    if title_tr is None:
         return ""
-    for candidate in [parent, parent.find_parent()]:
-        if candidate is None:
-            continue
-        text = candidate.get_text(separator=" ", strip=True)
-        match = re.search(
-            r"(?:donor|client|funder|funded by|issued by)[:\s]+([^\n|•]+)",
-            text, re.IGNORECASE
-        )
-        if match:
-            return match.group(1).strip()[:100]
+    tds = title_tr.find_all("td")
+    if len(tds) >= 2:
+        return tds[1].get_text(strip=True)
     return ""
 
 
-def _extract_nearby_country(a_tag) -> str:
-    parent = a_tag.find_parent()
-    if parent is None:
-        return ""
-    for candidate in [parent, parent.find_parent()]:
-        if candidate is None:
-            continue
-        text = candidate.get_text(separator=" ", strip=True)
-        match = re.search(
-            r"(?:country|location|region)[:\s]+([^\n|•]+)",
-            text, re.IGNORECASE
-        )
-        if match:
-            return match.group(1).strip()[:100]
-    return ""
+def _extract_metadata_rows(title_tr) -> tuple[str, str, str]:
+    """
+    Devex lays out donor/country/deadline as three plain-text <tr> rows
+    immediately following the title row (no field labels in the HTML).
+    """
+    if title_tr is None:
+        return "", "", ""
 
+    values = []
+    sib = title_tr
+    for _ in range(3):
+        sib = sib.find_next_sibling("tr") if sib is not None else None
+        values.append(sib.get_text(separator=" ", strip=True) if sib is not None else "")
 
-def _extract_nearby_deadline(a_tag) -> str:
-    parent = a_tag.find_parent()
-    if parent is None:
-        return ""
-    for candidate in [parent, parent.find_parent()]:
-        if candidate is None:
-            continue
-        text = candidate.get_text(separator=" ", strip=True)
-        match = re.search(
-            r"(?:deadline|closing date|due date|close)[:\s]+([^\n|•]+)",
-            text, re.IGNORECASE
-        )
-        if match:
-            return match.group(1).strip()[:60]
-    return ""
+    donor, country, deadline = values
+    return donor, country, deadline
 
 
 def _clean_url(url: str) -> str:

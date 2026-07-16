@@ -12,26 +12,34 @@ from email_pipeline.parse_developmentaid import parse_opportunities as parse_dev
 from email_pipeline.normalize import make_duplicate_key, infer_language, normalize_text
 
 
+# Devex lays out each opportunity as a title <tr> (with a status badge in a
+# second <td>) followed by three plain-text sibling <tr> rows for
+# donor/country/deadline (no field labels in the real markup), then two blank
+# spacer rows before the next opportunity. Verified against live alert emails.
 DEVEX_FIXTURE = """
 <html><body>
 <h2>Tenders &amp; Grants</h2>
 <table>
   <tr>
-    <td>
-      <a href="https://www.devex.com/en/opportunity/consulting-services-for-governance-reform-12345">
-        Consulting Services for Governance Reform in Ecuador
-      </a>
-      <br/>Donor: USAID | Country: Ecuador | Deadline: August 15, 2026
-    </td>
+    <td><div><a href="https://www.devex.com/en/opportunity/consulting-services-for-governance-reform-12345">
+      Consulting Services for Governance Reform in Ecuador
+    </a></div></td>
+    <td><div>OPEN</div></td>
   </tr>
+  <tr><td>USAID</td></tr>
+  <tr><td>Ecuador</td></tr>
+  <tr><td>August 15, 2026</td></tr>
+  <tr><td></td></tr>
+  <tr><td></td></tr>
   <tr>
-    <td>
-      <a href="https://www.devex.com/en/opportunity/technical-assistance-for-justice-sector-67890">
-        Technical Assistance for Justice Sector Strengthening
-      </a>
-      <br/>Donor: State Department / INL | Country: Mexico
-    </td>
+    <td><div><a href="https://www.devex.com/en/opportunity/technical-assistance-for-justice-sector-67890">
+      Technical Assistance for Justice Sector Strengthening
+    </a></div></td>
+    <td><div>FORECAST</div></td>
   </tr>
+  <tr><td>State Department / INL</td></tr>
+  <tr><td>Mexico</td></tr>
+  <tr><td>September 1, 2026</td></tr>
 </table>
 <a href="https://www.devex.com/home">Home</a>
 <a href="https://www.devex.com/account/unsubscribe">Unsubscribe</a>
@@ -39,26 +47,44 @@ DEVEX_FIXTURE = """
 </body></html>
 """
 
+# DevelopmentAid lays out each opportunity as an outer <tr> containing a
+# nested title table, followed by a sibling <tr> containing a nested
+# label/value table (Funding agency / Location / Deadline / ...).
+# Verified against live alert emails.
 DEVELOPMENTAID_FIXTURE = """
 <html><body>
 <h2>Tender Alert: LAC Contracts</h2>
 <h3>Open</h3>
 <table>
   <tr>
-    <td>
-      <a href="https://developmentaid.org/tenders/view/servicios-de-consultoria-para-seguridad-ciudadana-111">
+    <td><table><tr>
+      <td><a href="https://developmentaid.org/tenders/view/servicios-de-consultoria-para-seguridad-ciudadana-111">
         Servicios de Consultoría para Seguridad Ciudadana en Honduras
-      </a>
-      <br/>País: Honduras | Deadline: 2026-09-01 | Status: Open
-    </td>
+      </a></td>
+      <td>new</td>
+    </tr></table></td>
   </tr>
   <tr>
-    <td>
-      <a href="https://developmentaid.org/tenders/view/monitoring-evaluation-learning-melos-222">
+    <td><table>
+      <tr><td>Funding agency:</td><td>UNDP</td></tr>
+      <tr><td>Location:</td><td>Honduras</td></tr>
+      <tr><td>Deadline:</td><td>01 Sep, 2026</td></tr>
+    </table></td>
+  </tr>
+  <tr>
+    <td><table><tr>
+      <td><a href="https://developmentaid.org/tenders/view/monitoring-evaluation-learning-melos-222">
         Monitoring, Evaluation, Learning and Sharing (MELoS) for LAC Region
-      </a>
-      <br/>Country: Latin America | Deadline: 2026-08-30
-    </td>
+      </a></td>
+      <td>new</td>
+    </tr></table></td>
+  </tr>
+  <tr>
+    <td><table>
+      <tr><td>Funding agency:</td><td>World Bank Group</td></tr>
+      <tr><td>Location:</td><td>Latin America</td></tr>
+      <tr><td>Deadline:</td><td>30 Aug, 2026</td></tr>
+    </table></td>
   </tr>
 </table>
 <a href="https://developmentaid.org/login">Login</a>
@@ -92,6 +118,20 @@ class TestDevexParser:
         results = parse_devex(DEVEX_FIXTURE, "Business Alert: DOS")
         for r in results:
             assert len(r["opportunityTitle"]) >= 15
+
+    def test_extracts_donor_country_deadline_status(self):
+        results = parse_devex(DEVEX_FIXTURE, "Business Alert: DOS")
+        first = next(r for r in results if "Governance Reform" in r["opportunityTitle"])
+        assert first["donorClient"] == "USAID"
+        assert first["countryRegion"] == "Ecuador"
+        assert first["deadline"] == "August 15, 2026"
+        assert first["status"] == "OPEN"
+
+        second = next(r for r in results if "Justice Sector" in r["opportunityTitle"])
+        assert second["donorClient"] == "State Department / INL"
+        assert second["countryRegion"] == "Mexico"
+        assert second["deadline"] == "September 1, 2026"
+        assert second["status"] == "FORECAST"
 
 
 class TestDevelopmentAidParser:
@@ -129,6 +169,22 @@ class TestDevelopmentAidParser:
         )
         spanish_opp = next(r for r in results if "Seguridad" in r["opportunityTitle"])
         assert spanish_opp is not None
+
+    def test_extracts_donor_country_deadline(self):
+        results = parse_developmentaid(
+            DEVELOPMENTAID_FIXTURE,
+            "1 Funding opportunities from DevelopmentAid: LAC Contracts"
+        )
+        first = next(r for r in results if "Seguridad" in r["opportunityTitle"])
+        assert first["donorClient"] == "UNDP"
+        assert first["countryRegion"] == "Honduras"
+        assert first["deadline"] == "01 Sep, 2026"
+        assert first["deadlineISO"] == "2026-09-01"
+
+        second = next(r for r in results if "MELoS" in r["opportunityTitle"])
+        assert second["donorClient"] == "World Bank Group"
+        assert second["countryRegion"] == "Latin America"
+        assert second["deadline"] == "30 Aug, 2026"
 
 
 class TestNormalize:
