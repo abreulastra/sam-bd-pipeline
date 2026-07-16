@@ -6,7 +6,7 @@ agency_codes: []
 
 days_back: 7
 limit: 200
-max_records: 5000
+max_records: 20000
 
 # NAICS codes to exclude — irrelevant categories (janitorial, telecom, real estate, etc.)
 # Note: we do NOT limit to codes starting with 5 — all codes are collected except these.
