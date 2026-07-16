@@ -2,6 +2,7 @@ import os
 import time
 from datetime import datetime, timedelta, UTC
 
+import gspread
 from dotenv import load_dotenv
 
 from collect_sam import build_params, build_row, fetch_page
@@ -13,7 +14,12 @@ from sheets_client import (
     get_existing_ids,
     get_or_create_worksheet,
 )
-from utils import mmddyyyy
+from utils import mmddyyyy, normalize_date
+
+# Cleared on a high-priority row when SAM.gov shows a material change, so
+# sam-bd-agent (which only scores rows with a blank fitLabel) re-reviews it.
+RESCORE_FIELDS = ("fitLabel", "reviewSummary", "deadlineNote", "reviewedAtUTC")
+DIFF_FIELDS = ("title", "naicsCode", "type", "deadline")
 
 REQUIRED_HEADERS = [
     "noticeId",
@@ -40,6 +46,89 @@ LOG_HEADERS = [
     "newRows",
     "notes",
 ]
+
+
+def recheck_high_priority(ws, header, api_key) -> tuple[int, int]:
+    """
+    Re-fetch already-scored high-fit opportunities by noticeId and, if
+    SAM.gov shows a material change (deadline extended, scope/type changed),
+    update the row and clear fitLabel/reviewSummary/deadlineNote/reviewedAtUTC
+    so sam-bd-agent re-scores it on its next run.
+    """
+    needed = ("noticeId", "fitLabel", "postedDate") + DIFF_FIELDS
+    if not all(h in header for h in needed):
+        return 0, 0
+
+    idx = {h: header.index(h) for h in header}
+    vals = ws.get_all_values()
+    if len(vals) <= 1:
+        return 0, 0
+
+    checked = 0
+    updated = 0
+
+    for row_number, row in enumerate(vals[1:], start=2):
+        fit = row[idx["fitLabel"]].strip().lower() if len(row) > idx["fitLabel"] else ""
+        if fit != "high":
+            continue
+
+        notice_id = row[idx["noticeId"]] if len(row) > idx["noticeId"] else ""
+        if not notice_id:
+            continue
+
+        posted_date_str = row[idx["postedDate"]] if len(row) > idx["postedDate"] else ""
+        try:
+            posted_from = datetime.strptime(posted_date_str[:10], "%Y-%m-%d")
+        except ValueError:
+            posted_from = datetime.now(UTC) - timedelta(days=365)
+
+        params = build_params(
+            api_key=api_key,
+            posted_from=posted_from,
+            posted_to=datetime.now(UTC),
+            limit=1,
+            offset=0,
+            notice_id=notice_id,
+        )
+        checked += 1
+        time.sleep(0.35)
+
+        try:
+            data = fetch_page(params)
+        except Exception as exc:
+            print(f"  Recheck failed for {notice_id}: {exc}")
+            continue
+
+        items = data.get("opportunitiesData", []) or []
+        if not items:
+            continue
+        item = items[0]
+
+        fresh = {
+            "title": item.get("title") or "",
+            "naicsCode": str(item.get("naicsCode", "") or "").strip(),
+            "type": item.get("type") or "",
+            "deadline": normalize_date(item.get("responseDeadLine")),
+        }
+
+        changed = {
+            h: v for h, v in fresh.items()
+            if (row[idx[h]] if len(row) > idx[h] else "") != v
+        }
+        if not changed:
+            continue
+
+        cell_updates = []
+        for h, v in changed.items():
+            cell_updates.append({"range": gspread.utils.rowcol_to_a1(row_number, idx[h] + 1), "values": [[v]]})
+        for clear_field in RESCORE_FIELDS:
+            if clear_field in idx:
+                cell_updates.append({"range": gspread.utils.rowcol_to_a1(row_number, idx[clear_field] + 1), "values": [[""]]})
+
+        ws.batch_update(cell_updates, value_input_option="USER_ENTERED")
+        updated += 1
+
+    return checked, updated
 
 
 def main():
@@ -126,12 +215,15 @@ def main():
 
     inserted = 0
     if new_rows:
-        posted_date_idx = REQUIRED_HEADERS.index("postedDate")
+        posted_date_idx = header.index("postedDate")
         new_rows.sort(key=lambda row: row[posted_date_idx], reverse=True)
         ws.insert_rows(new_rows, row=2, value_input_option="USER_ENTERED")
         inserted = len(new_rows)
 
     print(f"Inserted {inserted} new rows at the top." if inserted else "No new rows to insert.")
+
+    checked, updated = recheck_high_priority(ws, header, api_key)
+    print(f"Rechecked {checked} high-priority opportunities, {updated} updated.")
 
     agencies_str = ",".join(agency_codes) if agency_codes else "ALL"
     notes = "; ".join(f"{k}:{v}" for k, v in per_agency_counts.items() if v > 0) or "no new rows"

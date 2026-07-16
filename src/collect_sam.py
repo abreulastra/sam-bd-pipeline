@@ -8,7 +8,7 @@ from utils import mmddyyyy, normalize_date, opp_url_from_notice
 API_BASE = "https://api.sam.gov/opportunities/v2/search"
 
 
-def build_params(api_key, posted_from, posted_to, limit, offset, organization_code=None, keyword=None):
+def build_params(api_key, posted_from, posted_to, limit, offset, organization_code=None, keyword=None, notice_id=None):
     params = {
         "api_key": api_key,
         "postedFrom": mmddyyyy(posted_from),
@@ -20,6 +20,8 @@ def build_params(api_key, posted_from, posted_to, limit, offset, organization_co
         params["organizationCode"] = organization_code
     if keyword:
         params["title"] = keyword
+    if notice_id:
+        params["noticeid"] = notice_id
     return params
 
 
