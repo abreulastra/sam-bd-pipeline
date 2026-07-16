@@ -29,7 +29,7 @@ Gmail (Devex + DevelopmentAid) →  src/email_pipeline/
                                         ↓
                                Google Sheet: Pipeline tab
                                         ↓
-                          (analyzed separately by sam-bd-agent)
+                          (analyzed and pruned separately by sam-bd-agent)
 ```
 
 ---
@@ -225,7 +225,9 @@ Both pipelines write to the same spreadsheet:
 | `pipelineStatus` | Always `New` on first write |
 | `fitScore` / `fitLabel` / `reviewSummary` | Filled later by `sam-bd-agent` |
 
-Rows are never overwritten — only appended when the `duplicateKey` is new.
+Rows are never overwritten by this pipeline — only appended when the `duplicateKey` is new.
+
+`sam-bd-agent` will later **delete** any row it scores `fitLabel: low` from both the `Opportunities` and `Pipeline` tabs, right after scoring it — this is the only process that removes rows, and it does so to keep the sheet from growing unbounded with opportunities nobody will act on.
 
 ---
 
