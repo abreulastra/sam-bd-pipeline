@@ -55,7 +55,7 @@ sam-bd-pipeline/
 ├── config/
 │   └── settings.yaml                  # SAM.gov pipeline configuration
 ├── tests/
-│   └── test_parsers.py                # Parser unit tests (14 tests)
+│   └── test_parsers.py                # Parser unit tests (16 tests)
 ├── .github/workflows/
 │   ├── collect.yml                    # SAM.gov daily workflow
 │   ├── pipeline_email_daily.yml       # Email pipeline daily workflow
@@ -200,13 +200,45 @@ agency_codes:
   - "524"   # Millennium Challenge Corporation
 ```
 
+Unrestricted, this returns roughly 8,000+ opportunities/week government-wide before NAICS filtering — `max_records` in `config/settings.yaml` is set to `20000` to give headroom above that.
+
+---
+
+## Re-checking High-Priority Opportunities
+
+SAM.gov opportunities sometimes get amended after they're first posted (deadline extended, scope changed). Since `sam-bd-agent` only scores a row once (skips anything with a `fitLabel` already set) and this pipeline's dedup skips any `noticeId` already ingested, an amendment would otherwise go unnoticed forever.
+
+Each `collect_sam_opportunities` run re-fetches every row where `fitLabel == "high"` directly by `noticeId`, and if SAM.gov's current `title`, `naicsCode`, `type`, or `deadline` differs from what's stored, it updates the row and clears `fitLabel`/`reviewSummary`/`deadlineNote`/`reviewedAtUTC` so `sam-bd-agent` re-scores it on its next run.
+
+This deliberately does **not** skip rows whose stored deadline has already passed — skipping would mean never discovering that SAM.gov extended a deadline on something already marked expired, which defeats the point. The tradeoff: nothing currently prunes the high-fit set (only low-fit rows get deleted), so this re-check list grows unbounded over time. Not a problem at current volume, but worth revisiting if it ever becomes a real latency/cost concern.
+
 ---
 
 ## Google Sheet Structure
 
 Both pipelines write to the same spreadsheet:
 
-**`Opportunities` tab** — SAM.gov federal contracting opportunities
+**`Opportunities` tab** — SAM.gov federal contracting opportunities:
+
+| Column | Description |
+|---|---|
+| `noticeId` | SAM.gov's unique ID for the opportunity |
+| `title` | Opportunity title |
+| `solicitationNumber` | SAM.gov solicitation number |
+| `postedDate` | Date SAM.gov posted the notice |
+| `type` | e.g. `Solicitation`, `Combined Synopsis/Solicitation`, `Presolicitation` |
+| `setAside` | Set-aside code, if any |
+| `naicsCode` | NAICS code |
+| `fullParentPathName` / `fullParentPathCode` | Full agency hierarchy |
+| `agencyCodeQueried` | Agency code this row was fetched under, or `ALL` |
+| `apiPulledAtUTC` | When this pipeline fetched it |
+| `oppUrl` | Link to the opportunity on sam.gov |
+| `deadline` | Response deadline (`responseDeadLine` from SAM.gov), `YYYY-MM-DD` |
+| `fitLabel` / `reviewSummary` / `deadlineNote` / `deadlineISO` / `reviewedAtUTC` / `emailedAtUTC` | Filled by `sam-bd-agent` — this pipeline never populates them, only clears them back to blank when [re-checking a high-priority row](#re-checking-high-priority-opportunities) that changed, to trigger a re-score |
+
+Rows are written by **matching each value to the sheet's actual current header, by column name** — never by a hardcoded position. This is deliberate: `sam-bd-agent` appends its own columns to this same tab, so any code that assumes a fixed column order will silently misalign once that header changes (this exact bug corrupted the sheet on 2026-07-16 — see `sheets_client.ensure_headers` and `main.py`'s row-building for the fix). If you ever add a new column, add it to `REQUIRED_HEADERS` and nothing else needs to change.
+
+Both workflows also carry a `concurrency` block so overlapping runs can't happen — that same 2026-07-16 incident was caused by two runs racing on the header at once.
 
 **`Pipeline` tab** — Email-sourced opportunities (Devex + DevelopmentAid):
 
