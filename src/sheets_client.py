@@ -34,11 +34,12 @@ def ensure_headers(ws, headers):
     existing = ws.row_values(1)
     new_cols = [h for h in headers if h not in existing]
     if new_cols:
-        existing.extend(new_cols)
-        ws.delete_rows(1)
-        ws.insert_row(existing, 1)
+        existing = existing + new_cols
+        # Single overwrite of row 1 — avoids the delete+insert race where a
+        # concurrent run can read/write mid-way through and corrupt the header.
+        ws.update([existing], "A1")
 
-    return ws.row_values(1)
+    return existing
 
 
 def get_existing_ids(ws, header, required_headers):

@@ -111,7 +111,7 @@ def main():
                     continue
 
                 row_dict = build_row(item, agency_code, api_pulled_at_utc)
-                new_rows.append([row_dict.get(h, "") for h in REQUIRED_HEADERS])
+                new_rows.append([row_dict.get(h, "") for h in header])
                 existing_ids.add(notice_id)
                 per_agency_counts[agency_code or "ALL"] += 1
 

@@ -52,8 +52,8 @@ def get_existing_duplicate_keys(ws, header: list[str]) -> set[str]:
     return {row[col_idx] for row in vals[1:] if len(row) > col_idx and row[col_idx]}
 
 
-def build_row(opportunity: dict) -> list:
-    return [opportunity.get(h, "") for h in PIPELINE_HEADERS]
+def build_row(opportunity: dict, header: list[str]) -> list:
+    return [opportunity.get(h, "") for h in header]
 
 
 def append_opportunities(opportunities: list[dict], sheet_url: str | None = None) -> dict:
@@ -86,7 +86,7 @@ def append_opportunities(opportunities: list[dict], sheet_url: str | None = None
             skipped += 1
             logger.debug("Skipping duplicate: %s", key)
             continue
-        new_rows.append(build_row(opp))
+        new_rows.append(build_row(opp, header))
         existing_keys.add(key)
 
     if new_rows:
