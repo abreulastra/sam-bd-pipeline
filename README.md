@@ -200,6 +200,16 @@ agency_codes:
   - "524"   # Millennium Challenge Corporation
 ```
 
+Separately, `exclude_agencies` filters out specific top-level departments **after** they're fetched, matched against the first segment of `fullParentPathName` (e.g. `"DEPT OF DEFENSE"`). This exists because some departments buy broadly enough across NAICS codes that the NAICS filter above won't catch them, even though C230 has no realistic fit there:
+
+```yaml
+exclude_agencies:
+  - "DEPT OF DEFENSE"
+  - "VETERANS AFFAIRS, DEPARTMENT OF"
+```
+
+As of 2026-07, these two alone accounted for ~64% of all collected rows.
+
 Unrestricted, this returns roughly 8,000+ opportunities/week government-wide before NAICS filtering — `max_records` in `config/settings.yaml` is set to `20000` to give headroom above that.
 
 ---
