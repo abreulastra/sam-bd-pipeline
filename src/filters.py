@@ -42,3 +42,20 @@ def passes_naics_filter(naics: str, exclude_naics: set) -> bool:
         return False
 
     return True
+
+
+def passes_agency_filter(full_parent_path_name: str, exclude_agencies: set) -> bool:
+    """
+    Returns True (keep) if the opportunity should be collected.
+
+    Excludes opportunities whose top-level department (the first segment of
+    fullParentPathName, e.g. "DEPT OF DEFENSE") is in exclude_agencies — for
+    departments that buy broadly enough across NAICS codes that the NAICS
+    filter alone won't catch them, but where C230 has no realistic fit
+    regardless of NAICS.
+    """
+    if not full_parent_path_name or not exclude_agencies:
+        return True
+
+    top_level = full_parent_path_name.split(".")[0].strip()
+    return top_level not in exclude_agencies

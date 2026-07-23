@@ -7,7 +7,7 @@ from dotenv import load_dotenv
 
 from collect_sam import build_params, build_row, fetch_page
 from config import get_env, load_config
-from filters import passes_naics_filter
+from filters import passes_agency_filter, passes_naics_filter
 from sheets_client import (
     build_gspread_client,
     ensure_headers,
@@ -144,6 +144,7 @@ def main():
     limit = int(config["limit"])
     max_records = int(config["max_records"])
     exclude_naics = set(config["exclude_naics"])
+    exclude_agencies = set(config.get("exclude_agencies", []))
     keyword = os.getenv("KEYWORDS") or None
 
     gc = build_gspread_client()
@@ -197,6 +198,10 @@ def main():
 
                 naics = str(item.get("naicsCode", "") or "").strip()
                 if not passes_naics_filter(naics, exclude_naics):
+                    continue
+
+                full_parent_path_name = str(item.get("fullParentPathName", "") or "")
+                if not passes_agency_filter(full_parent_path_name, exclude_agencies):
                     continue
 
                 row_dict = build_row(item, agency_code, api_pulled_at_utc)

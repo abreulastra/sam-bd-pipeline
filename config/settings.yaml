@@ -8,6 +8,15 @@ days_back: 7
 limit: 200
 max_records: 20000
 
+# Top-level departments to exclude entirely (exact match on the first segment
+# of fullParentPathName) — these buy broadly enough across NAICS codes that
+# the NAICS filter alone doesn't catch them, but C230 has no realistic fit
+# there regardless of NAICS. As of 2026-07, DoD + VA alone were ~64% of all
+# collected rows.
+exclude_agencies:
+  - "DEPT OF DEFENSE"
+  - "VETERANS AFFAIRS, DEPARTMENT OF"
+
 # NAICS codes to exclude — irrelevant categories (janitorial, telecom, real estate, etc.)
 # Note: we do NOT limit to codes starting with 5 — all codes are collected except these.
 exclude_naics:
