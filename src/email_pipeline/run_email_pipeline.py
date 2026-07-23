@@ -88,7 +88,7 @@ def process_email(email: dict) -> list[dict]:
             "fitScore": "",
             "fitLabel": "",
             "reviewSummary": "",
-            "duplicateKey": make_duplicate_key(source_label, title, donor, country),
+            "duplicateKey": make_duplicate_key(source_label, title, donor, country, url=opp.get("url", "")),
             "processedAtUTC": processed,
             "owner": "",
             "pipelineStatus": "New",
