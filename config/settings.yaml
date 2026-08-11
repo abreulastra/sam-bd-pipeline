@@ -1,8 +1,24 @@
 worksheet_title: Opportunities
 runlog_title: RunLog
 
-# Empty = no agency restriction, search all of SAM.gov
-agency_codes: []
+# Curated allowlist of agencies where C230 actually has fit -- codes are
+# CGAC/SAM.gov organizationCode values, verified against SAM.gov's Federal
+# Hierarchy API (api.sam.gov/prod/federalorganizations/v1/orgs) on 2026-08-11.
+# Replaces the earlier "collect everything, blocklist a few agencies"
+# approach: even after excluding DoD/VA (see exclude_agencies below), most
+# remaining federal volume was still domestic agency operations (Interior,
+# HHS, Homeland Security, NASA, GSA, ...) that don't match C230's
+# international development / MEL / justice-sector advisory focus. State
+# Dept -- the one agency where C230 has deep track record (INL) -- was only
+# ~2.6% of total volume under the old approach.
+agency_codes:
+  - "019"   # State, Department of
+  - "524"   # Millennium Challenge Corporation
+  - "011"   # U.S. Trade and Development Agency (USTDA)
+  - "016"   # Labor, Department of
+  - "013"   # Commerce, Department of
+  - "077"   # U.S. International Development Finance Corporation (DFC)
+  - "012"   # Agriculture, Department of (USDA)
 
 days_back: 7
 limit: 200

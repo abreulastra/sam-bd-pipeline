@@ -186,21 +186,28 @@ Additional specific codes (janitorial, telecom, insurance, etc.) are excluded vi
 
 ## Agency Scope
 
-`config/settings.yaml`'s `agency_codes` controls which agencies are queried:
-
-```yaml
-agency_codes: []   # empty = no restriction, search all of SAM.gov
-```
-
-By default this is empty, so the pipeline searches opportunities from every federal agency (subject to the NAICS filtering above). To restrict collection back to a specific set of agencies, list their SAM.gov organization codes:
+`config/settings.yaml`'s `agency_codes` controls which agencies are queried. As of 2026-08, this is a **curated allowlist** — each code triggers its own SAM.gov query, so only these agencies are collected at all:
 
 ```yaml
 agency_codes:
-  - "019"   # Department of State
+  - "019"   # State, Department of
   - "524"   # Millennium Challenge Corporation
+  - "011"   # U.S. Trade and Development Agency (USTDA)
+  - "016"   # Labor, Department of
+  - "013"   # Commerce, Department of
+  - "077"   # U.S. International Development Finance Corporation (DFC)
+  - "012"   # Agriculture, Department of (USDA)
 ```
 
-Separately, `exclude_agencies` filters out specific top-level departments **after** they're fetched, matched against the first segment of `fullParentPathName` (e.g. `"DEPT OF DEFENSE"`). This exists because some departments buy broadly enough across NAICS codes that the NAICS filter above won't catch them, even though C230 has no realistic fit there:
+Leave `agency_codes: []` to remove the restriction and search all of SAM.gov instead (subject to the NAICS filtering above) — this was the previous default, but it pulled in far more volume than the Opportunities-tab scoring pipeline could process, and most of it (domestic agency operations — Interior, HHS, Homeland Security, NASA, GSA, etc.) doesn't match C230's international development / MEL / justice-sector advisory focus anyway.
+
+Codes are CGAC / SAM.gov `organizationCode` values. Look up a department's code via SAM.gov's Federal Hierarchy API:
+
+```bash
+curl "https://api.sam.gov/prod/federalorganizations/v1/orgs?api_key=$SAM_API_KEY&fhorgname=<NAME>&fhorgtype=Department%2FInd.%20agency&status=active"
+```
+
+Separately, `exclude_agencies` filters out specific top-level departments **after** they're fetched, matched against the first segment of `fullParentPathName` (e.g. `"DEPT OF DEFENSE"`). With a curated `agency_codes` allowlist this is now redundant in practice (DoD/VA are never queried), but it's left in place as a harmless safety net in case `agency_codes` is ever widened again:
 
 ```yaml
 exclude_agencies:
