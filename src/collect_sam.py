@@ -46,6 +46,7 @@ def fetch_page(params, retries=3):
 def build_row(item, agency_code, api_pulled_at_utc):
     notice_id = str(item.get("noticeId", "") or "").strip()
     naics = str(item.get("naicsCode", "") or "").strip()
+    resource_links = item.get("resourceLinks") or []
 
     return {
         "noticeId": notice_id,
@@ -61,4 +62,8 @@ def build_row(item, agency_code, api_pulled_at_utc):
         "agencyCodeQueried": agency_code or "ALL",
         "apiPulledAtUTC": api_pulled_at_utc,
         "oppUrl": opp_url_from_notice(notice_id),
+        # Direct attachment download URLs from SAM.gov's own API -- more
+        # reliable than scraping the notice page, whose Attachments section
+        # loads asynchronously and isn't present in the initial page HTML.
+        "resourceLinks": "|".join(resource_links),
     }
