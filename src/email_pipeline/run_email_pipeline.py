@@ -157,6 +157,7 @@ def main():
                 "deadline": deadline,
                 "deadlineISO": deadline_iso,
                 "url": opp["url"],
+                "torText": opp.get("torText", ""),
                 "language": infer_language(title),
                 "fitScore": "",
                 "fitLabel": "",

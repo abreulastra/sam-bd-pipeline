@@ -28,6 +28,7 @@ PIPELINE_HEADERS = [
     "deadline",
     "deadlineISO",
     "url",
+    "torText",
     "language",
     "fitScore",
     "fitLabel",
