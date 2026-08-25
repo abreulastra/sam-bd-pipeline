@@ -2,7 +2,7 @@
 Entry point for the email opportunity pipeline.
 
 Usage:
-    python -m src.email_pipeline.run_email_pipeline [--days 7] [--dry-run] [--limit N] [--source devex|developmentaid|all]
+    python -m src.email_pipeline.run_email_pipeline [--days 7] [--dry-run] [--limit N] [--source devex|developmentaid|idbbeo|all]
 """
 import argparse
 import logging
@@ -15,6 +15,7 @@ from dotenv import load_dotenv
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from email_pipeline.fetch_gmail import fetch_emails
+from email_pipeline.fetch_idb_beo import fetch_opportunities as fetch_idb_beo
 from email_pipeline.normalize import (
     infer_language,
     make_duplicate_key,
@@ -40,7 +41,7 @@ def parse_args():
     p.add_argument("--limit", type=int, default=None, help="Max emails to process per source")
     p.add_argument(
         "--source",
-        choices=["devex", "developmentaid", "all"],
+        choices=["devex", "developmentaid", "idbbeo", "all"],
         default="all",
         help="Filter by source (default: all)",
     )
@@ -121,20 +122,57 @@ def main():
     logger.info("Gmail account: %s", account)
     logger.info("Days back: %d | Source: %s | Dry run: %s", args.days, args.source, args.dry_run)
 
-    emails = fetch_emails(days=args.days, limit=args.limit, source_filter=args.source)
-    logger.info("Total emails fetched: %d", len(emails))
-
     all_opportunities = []
-    for email in emails:
-        opps = process_email(email)
-        all_opportunities.extend(opps)
+
+    # ── Email sources (Devex + DevelopmentAid) ──────────────────────────────
+    if args.source in ("devex", "developmentaid", "all"):
+        emails = fetch_emails(days=args.days, limit=args.limit, source_filter=args.source)
+        logger.info("Total emails fetched: %d", len(emails))
+        for email in emails:
+            opps = process_email(email)
+            all_opportunities.extend(opps)
+
+    # ── IDB BEO web scrape ───────────────────────────────────────────────────
+    if args.source in ("idbbeo", "all"):
+        logger.info("Fetching IDB BEO opportunities...")
+        beo_raw = fetch_idb_beo()
+        processed = now_utc_iso()
+        today = processed[:10]
+        for opp in beo_raw:
+            title = opp["opportunityTitle"]
+            donor = opp["donorClient"]
+            country = opp["countryRegion"]
+            deadline = opp["deadline"]
+            deadline_iso = opp["deadlineISO"]
+            all_opportunities.append({
+                "source": "IDB BEO",
+                "emailDate": today,
+                "emailSubject": "",
+                "alertName": "IDB BEO",
+                "opportunityTitle": title,
+                "donorClient": donor,
+                "countryRegion": country,
+                "opportunityType": opp.get("opportunityType", ""),
+                "status": opp.get("selectionId", ""),
+                "deadline": deadline,
+                "deadlineISO": deadline_iso,
+                "url": opp["url"],
+                "language": infer_language(title),
+                "fitScore": "",
+                "fitLabel": "",
+                "reviewSummary": "",
+                "duplicateKey": make_duplicate_key("IDB BEO", title, donor, country),
+                "processedAtUTC": processed,
+                "owner": "",
+                "pipelineStatus": "New",
+            })
+        logger.info("IDB BEO opportunities extracted: %d", len(beo_raw))
 
     logger.info("Total opportunities extracted: %d", len(all_opportunities))
 
     if args.dry_run:
         print(f"\n=== DRY RUN RESULTS ===")
         print(f"Gmail account:            {account}")
-        print(f"Emails found:             {len(emails)}")
         print(f"Opportunities extracted:  {len(all_opportunities)}")
         print_preview(all_opportunities)
         print("Dry run complete — nothing written to Google Sheets.")
