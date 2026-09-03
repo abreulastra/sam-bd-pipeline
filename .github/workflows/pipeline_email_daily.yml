@@ -36,6 +36,7 @@ jobs:
           GMAIL_CLIENT_SECRET: ${{ secrets.GMAIL_CLIENT_SECRET }}
           GMAIL_REFRESH_TOKEN: ${{ secrets.GMAIL_REFRESH_TOKEN }}
           GMAIL_ACCOUNT_EMAIL: ${{ secrets.GMAIL_ACCOUNT_EMAIL }}
+          DEVELOPMENTAID_API_KEY: ${{ secrets.DEVELOPMENTAID_API_KEY }}
           GOOGLE_SHEET_ID: ${{ secrets.GOOGLE_SHEET_ID }}
           GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
           SHEET_URL: ${{ secrets.SHEET_URL }}

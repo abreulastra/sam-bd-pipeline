@@ -10,6 +10,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 from email_pipeline.parse_devex import parse_opportunities as parse_devex, parse_alert_name
 from email_pipeline.parse_developmentaid import parse_opportunities as parse_developmentaid
 from email_pipeline.normalize import make_duplicate_key, infer_language, normalize_text
+from utils import extract_excerpt
 
 
 # Devex lays out each opportunity as a title <tr> (with a status badge in a
@@ -198,9 +199,66 @@ class TestNormalize:
         assert "some title" in key
         assert key.count("|") == 3
 
+    def test_duplicate_key_prefers_stable_id(self):
+        # A passed-in stable_id (e.g. DevelopmentAid's own numeric tender ID)
+        # takes precedence over both the URL-regex path and the text-based
+        # fallback -- two calls with different title/donor/country but the
+        # same stable_id must dedupe to the same key.
+        key1 = make_duplicate_key(
+            "DevelopmentAid", "Title A", "Donor A", "Country A",
+            stable_id="developmentaid-api:tender:12345",
+        )
+        key2 = make_duplicate_key(
+            "DevelopmentAid", "Title B", "Donor B", "Country B",
+            stable_id="developmentaid-api:tender:12345",
+        )
+        assert key1 == key2
+        assert "developmentaid-api:tender:12345" in key1
+
     def test_language_detection(self):
         assert infer_language("Servicios de consultoría para fortalecimiento") == "Spanish"
         assert infer_language("Governance Reform Technical Assistance") == "English"
 
     def test_normalize_removes_punctuation(self):
         assert normalize_text("Hello, World! Test.") == "hello world test"
+
+
+class TestExtractExcerpt:
+    def test_finds_clean_heading(self):
+        text = (
+            "Some cover page text here.\n\n"
+            "SCOPE OF WORK\n"
+            "The contractor shall provide consulting services for the "
+            "modernization of the national health information system."
+        )
+        excerpt = extract_excerpt(text, max_chars=200)
+        assert excerpt.startswith("SCOPE OF WORK")
+        assert "modernization" in excerpt
+
+    def test_skips_table_of_contents_entry(self):
+        # "Purpose" appears twice: once as a dot-leader TOC line (must be
+        # skipped), once as the real section header further down.
+        text = (
+            "CONTENTS\n"
+            "1. Purpose ....................................... 4\n"
+            "2. Background ................................... 6\n\n"
+            "1. PURPOSE\n"
+            "This document sets out the terms of reference for the assignment."
+        )
+        excerpt = extract_excerpt(text, max_chars=200)
+        assert "......." not in excerpt
+        assert "terms of reference for the assignment" in excerpt
+
+    def test_falls_back_to_start_when_no_heading_matches(self):
+        text = "This document does not contain any of the tracked section headings at all."
+        excerpt = extract_excerpt(text, max_chars=20)
+        assert excerpt == text[:20]
+
+    def test_respects_max_chars(self):
+        text = "Objective: " + ("x" * 5000)
+        excerpt = extract_excerpt(text, max_chars=100)
+        assert len(excerpt) <= 100
+
+    def test_empty_text(self):
+        assert extract_excerpt("", max_chars=100) == ""
+        assert extract_excerpt(None, max_chars=100) == ""

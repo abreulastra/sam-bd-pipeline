@@ -2,7 +2,7 @@
 
 Automated business development pipeline for **C230 Consulting Group**.
 
-Pulls federal contracting opportunities from **SAM.gov** and email alerts from **Devex** and **DevelopmentAid**, filters and de-duplicates them, and writes results to a shared **Google Sheet** for daily review.
+Pulls federal contracting opportunities from **SAM.gov**, Devex email alerts, **DevelopmentAid**'s external API, and IDB BEO's procurement site, filters and de-duplicates them, and writes results to a shared **Google Sheet** for daily review.
 
 Opportunity scoring and analysis is handled separately by the [`sam-bd-agent`](https://github.com/abreulastra/sam-bd-agent) repository.
 
@@ -14,7 +14,8 @@ Opportunity scoring and analysis is handled separately by the [`sam-bd-agent`](h
 |---|---|---|
 | SAM.gov Opportunities API | `Opportunities` | Weekdays, 11:15 AM UTC |
 | Devex email alerts | `Pipeline` | Weekdays, 12:00 PM UTC |
-| DevelopmentAid email alerts | `Pipeline` | Weekdays, 12:00 PM UTC |
+| DevelopmentAid external API | `Pipeline` | Weekdays, 12:00 PM UTC |
+| IDB BEO procurement scrape | `Pipeline` | Weekdays, 12:00 PM UTC |
 
 ---
 
@@ -25,8 +26,9 @@ SAM.gov API  ──────────────────→  src/main
                                         ↓
                                Google Sheet: Opportunities tab
 
-Gmail (Devex + DevelopmentAid) →  src/email_pipeline/
-                                        ↓
+Gmail (Devex) ─────────────────┐
+DevelopmentAid API ─────────────┼→  src/email_pipeline/
+IDB BEO web scrape ─────────────┘         ↓
                                Google Sheet: Pipeline tab
                                         ↓
                           (analyzed and pruned separately by sam-bd-agent)
@@ -47,15 +49,17 @@ sam-bd-pipeline/
 │   ├── utils.py                       # Utilities
 │   └── email_pipeline/
 │       ├── run_email_pipeline.py      # Email pipeline entry point (CLI)
-│       ├── fetch_gmail.py             # Gmail API client
+│       ├── fetch_gmail.py             # Gmail API client (Devex only)
 │       ├── parse_devex.py             # Devex HTML parser
-│       ├── parse_developmentaid.py    # DevelopmentAid HTML parser
+│       ├── fetch_developmentaid_api.py # DevelopmentAid external API client
+│       ├── parse_developmentaid.py    # Unused — retired in favor of the API client above
+│       ├── fetch_idb_beo.py           # IDB BEO procurement web scrape
 │       ├── normalize.py               # Deduplication and language detection
 │       └── write_pipeline_sheet.py    # Writes to Pipeline tab
 ├── config/
 │   └── settings.yaml                  # SAM.gov pipeline configuration
 ├── tests/
-│   └── test_parsers.py                # Parser unit tests (16 tests)
+│   └── test_parsers.py                # Parser unit tests (22 tests)
 ├── .github/workflows/
 │   ├── collect.yml                    # SAM.gov daily workflow
 │   ├── pipeline_email_daily.yml       # Email pipeline daily workflow
@@ -109,10 +113,10 @@ python -m src.email_pipeline.run_email_pipeline --help
 
 | Flag | Default | Description |
 |---|---|---|
-| `--days` | `7` | Days back to search Gmail |
+| `--days` | `7` | Days back to search (Gmail search window / DevelopmentAid `postedFrom`) |
 | `--dry-run` | off | Print results without writing to Sheets |
-| `--limit` | none | Max emails to process per source |
-| `--source` | `all` | Filter: `devex`, `developmentaid`, or `all` |
+| `--limit` | none | Max emails to process (Devex only — DevelopmentAid/IDB BEO ignore this) |
+| `--source` | `all` | Filter: `devex`, `developmentaid`, `idbbeo`, or `all` |
 
 ---
 
@@ -134,7 +138,9 @@ GMAIL_CLIENT_ID=your_client_id.apps.googleusercontent.com
 GMAIL_CLIENT_SECRET=your_client_secret
 GMAIL_REFRESH_TOKEN=your_refresh_token
 GMAIL_ACCOUNT_EMAIL=your-email@yourdomain.com
-DEVELOPMENTAID_SENDER=pipeline@yourdomain.com
+
+# DevelopmentAid external API (member companies only)
+DEVELOPMENTAID_API_KEY=your_developmentaid_api_key
 ```
 
 ---
@@ -153,7 +159,7 @@ Set these in **Settings → Secrets and variables → Actions**:
 | `GMAIL_CLIENT_SECRET` | Email workflow | OAuth client secret |
 | `GMAIL_REFRESH_TOKEN` | Email workflow | OAuth refresh token |
 | `GMAIL_ACCOUNT_EMAIL` | Email workflow | Gmail account to read |
-| `DEVELOPMENTAID_SENDER` | Email workflow | DevelopmentAid forwarding address |
+| `DEVELOPMENTAID_API_KEY` | Email workflow | DevelopmentAid external API key |
 
 ---
 
@@ -231,6 +237,25 @@ This deliberately does **not** skip rows whose stored deadline has already passe
 
 ---
 
+## DevelopmentAid API
+
+DevelopmentAid opportunities used to arrive as forwarded alert emails, parsed from inconsistent HTML layouts. As of 2026-08, this pipeline instead calls DevelopmentAid's own external API directly (`fetch_developmentaid_api.py`) — member-company access, authenticated via `X-API-KEY`. `parse_developmentaid.py` (the old email parser) is left in the repo but no longer called.
+
+**Scope**, set in `fetch_developmentaid_api.py`, matches what the retired email alerts covered:
+- `LOCATIONS = [4, 103]` — Latin America & the Caribbean (region) + Mexico (country; a subset of the region, kept explicit for parity with the old "Mexico Contracts" saved search)
+- `STATUSES = [2, 3]` — forecast, open (excludes closed/awarded/cancelled/shortlisted)
+- Both `/tenders/search` and `/grants/search` are queried, each `--days` back by `postedFrom`/`postedTill`
+
+For each match, `GET /tenders/{id}` (or `/grants/{id}`) fetches full details — donor, country, description, deadline, and a `documents[]` list — and each attachment (up to 5 per opportunity) is downloaded via `GET /{kind}/{id}/documents/{docId}` and text-extracted with `pdfplumber` into `torText`, the same approach `fetch_idb_beo.py` uses for IDB's ToR PDFs.
+
+**Deliberately not used to filter anything.** The attachment text is stored for `sam-bd-agent`'s scoring to use, but every matching opportunity is still written to the sheet regardless of its content — a keyword or content-based hard filter here risks silently dropping a real opportunity that doesn't happen to use the expected terms, the same risk that made the SAM.gov `exclude_agencies` decision (above) require actual data first. If this needs to get more selective later, that's `sam-bd-agent`'s call to make with its existing LLM scoring, not a blocklist in the ingestion layer.
+
+Deduplication uses DevelopmentAid's own numeric tender/grant ID (`developmentaid-api:tender:<id>` / `developmentaid-api:grant:<id>`) via `make_duplicate_key`'s `stable_id` param — far more reliable than the old text-based key, and immune to the two-different-HTML-layouts bug that caused duplicate rows under the email-based approach (see git history for `normalize.py`). One expected, harmless side effect: since the key format changed, an opportunity already ingested by email before the cutover and now also matched by the API will insert once more as a "new" row — a one-time overlap, not an ongoing issue.
+
+Update/amendment detection (like the SAM.gov high-priority re-check above) was intentionally not built for this source yet, even though DevelopmentAid's `modifiedDate`/`modifiedAfter` filter would make it easier than SAM.gov's API allowed — it's a natural follow-up, not a blocker for the initial integration.
+
+---
+
 ## Google Sheet Structure
 
 Both pipelines write to the same spreadsheet:
@@ -257,22 +282,25 @@ Rows are written by **matching each value to the sheet's actual current header, 
 
 Both workflows also carry a `concurrency` block so overlapping runs can't happen — that same 2026-07-16 incident was caused by two runs racing on the header at once.
 
-**`Pipeline` tab** — Email-sourced opportunities (Devex + DevelopmentAid):
+**`Pipeline` tab** — Devex (email) + DevelopmentAid (API) + IDB BEO (web scrape) opportunities:
 
 | Column | Description |
 |---|---|
-| `source` | `Devex` or `DevelopmentAid` |
-| `emailDate` | Date the alert email was sent |
-| `alertName` | Alert name parsed from email subject |
-| `opportunityTitle` | Extracted opportunity title |
-| `donorClient` | Donor or client if visible |
-| `countryRegion` | Country or region if visible |
-| `opportunityType` | `Tenders & Grants`, `Tender`, `Grant`, or `Opportunity` |
+| `source` | `Devex`, `DevelopmentAid`, or `IDB BEO` |
+| `emailDate` | Date the Devex alert email was sent (or fetch date for API/scrape sources) |
+| `alertName` | Devex saved-search name, or `DevelopmentAid API (Tender/Grant)`, or `IDB BEO` |
+| `opportunityTitle` | Opportunity title |
+| `donorClient` | Donor or client if available |
+| `countryRegion` | Country or region if available |
+| `opportunityType` | `Tenders & Grants`, `Tender`, `Grant`, or a sub-sector string (IDB BEO) |
+| `deadline` / `deadlineISO` | Submission deadline, raw and parsed |
 | `url` | Link to the opportunity |
+| `torText` | Extracted attachment/document text (DevelopmentAid, IDB BEO) — informational only, not used to filter rows; `sam-bd-agent`'s scoring is the judgment call |
+| `resourceLinks` | Pipe-separated attachment download URLs (DevelopmentAid — requires `DEVELOPMENTAID_API_KEY` to actually download) |
 | `language` | `English` or `Spanish` (auto-detected) |
 | `duplicateKey` | Deterministic key for deduplication |
 | `pipelineStatus` | Always `New` on first write |
-| `fitScore` / `fitLabel` / `reviewSummary` | Filled later by `sam-bd-agent` |
+| `emailedAtUTC` / `fitScore` / `fitLabel` / `reviewSummary` | Filled later by `sam-bd-agent` |
 
 Rows are never overwritten by this pipeline — only appended when the `duplicateKey` is new.
 

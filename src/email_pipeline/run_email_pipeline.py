@@ -1,6 +1,12 @@
 """
 Entry point for the email opportunity pipeline.
 
+Sources:
+  devex           Gmail alert emails from alerts@devex.com
+  developmentaid  DevelopmentAid's external API directly (not email --
+                  see fetch_developmentaid_api.py)
+  idbbeo          IDB BEO procurement web scrape
+
 Usage:
     python -m src.email_pipeline.run_email_pipeline [--days 7] [--dry-run] [--limit N] [--source devex|developmentaid|idbbeo|all]
 """
@@ -14,6 +20,7 @@ from dotenv import load_dotenv
 # Allow relative imports when run as __main__
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
+from email_pipeline.fetch_developmentaid_api import fetch_opportunities as fetch_developmentaid_api
 from email_pipeline.fetch_gmail import fetch_emails
 from email_pipeline.fetch_idb_beo import fetch_opportunities as fetch_idb_beo
 from email_pipeline.normalize import (
@@ -23,7 +30,6 @@ from email_pipeline.normalize import (
     parse_deadline_iso,
 )
 from email_pipeline.parse_devex import parse_opportunities as parse_devex
-from email_pipeline.parse_developmentaid import parse_opportunities as parse_developmentaid
 from email_pipeline.write_pipeline_sheet import append_opportunities
 
 logging.basicConfig(
@@ -53,12 +59,9 @@ def process_email(email: dict) -> list[dict]:
     html = email["html_body"]
     subject = email["subject"]
 
-    if source == "devex":
-        raw_opps = parse_devex(html, subject)
-    elif source == "developmentaid":
-        raw_opps = parse_developmentaid(html, subject)
-    else:
+    if source != "devex":
         return []
+    raw_opps = parse_devex(html, subject)
 
     processed = now_utc_iso()
     results = []
@@ -70,7 +73,7 @@ def process_email(email: dict) -> list[dict]:
         deadline = opp.get("deadline", "")
         deadline_iso = opp.get("deadlineISO", "") or parse_deadline_iso(deadline)
 
-        source_label = "Devex" if source == "devex" else "DevelopmentAid"
+        source_label = "Devex"
 
         results.append({
             "source": source_label,
@@ -124,13 +127,55 @@ def main():
 
     all_opportunities = []
 
-    # ── Email sources (Devex + DevelopmentAid) ──────────────────────────────
-    if args.source in ("devex", "developmentaid", "all"):
-        emails = fetch_emails(days=args.days, limit=args.limit, source_filter=args.source)
+    # ── Devex (Gmail alert emails) ───────────────────────────────────────────
+    if args.source in ("devex", "all"):
+        emails = fetch_emails(days=args.days, limit=args.limit, source_filter="devex")
         logger.info("Total emails fetched: %d", len(emails))
         for email in emails:
             opps = process_email(email)
             all_opportunities.extend(opps)
+
+    # ── DevelopmentAid (external API) ────────────────────────────────────────
+    if args.source in ("developmentaid", "all"):
+        da_api_key = os.environ.get("DEVELOPMENTAID_API_KEY")
+        if not da_api_key:
+            logger.warning("DEVELOPMENTAID_API_KEY not set — skipping DevelopmentAid")
+        else:
+            logger.info("Fetching DevelopmentAid opportunities via API...")
+            da_raw = fetch_developmentaid_api(api_key=da_api_key, days_back=args.days)
+            processed = now_utc_iso()
+            today = processed[:10]
+            for opp in da_raw:
+                title = opp["opportunityTitle"]
+                donor = opp["donorClient"]
+                country = opp["countryRegion"]
+                all_opportunities.append({
+                    "source": "DevelopmentAid",
+                    "emailDate": today,
+                    "emailSubject": "",
+                    "alertName": f"DevelopmentAid API ({opp['opportunityType']})",
+                    "opportunityTitle": title,
+                    "donorClient": donor,
+                    "countryRegion": country,
+                    "opportunityType": opp.get("opportunityType", ""),
+                    "status": opp.get("status", ""),
+                    "deadline": opp.get("deadline", ""),
+                    "deadlineISO": opp.get("deadlineISO", ""),
+                    "url": opp.get("url", ""),
+                    "torText": opp.get("torText", ""),
+                    "resourceLinks": opp.get("resourceLinks", ""),
+                    "language": infer_language(title),
+                    "fitScore": "",
+                    "fitLabel": "",
+                    "reviewSummary": "",
+                    "duplicateKey": make_duplicate_key(
+                        "DevelopmentAid", title, donor, country, stable_id=opp.get("stableId", "")
+                    ),
+                    "processedAtUTC": processed,
+                    "owner": "",
+                    "pipelineStatus": "New",
+                })
+            logger.info("DevelopmentAid opportunities extracted: %d", len(da_raw))
 
     # ── IDB BEO web scrape ───────────────────────────────────────────────────
     if args.source in ("idbbeo", "all"):

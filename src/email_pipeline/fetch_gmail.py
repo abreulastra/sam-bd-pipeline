@@ -1,6 +1,9 @@
 """
-Gmail API client for fetching Devex and DevelopmentAid alert emails.
+Gmail API client for fetching Devex alert emails.
 Authenticates using OAuth2 credentials stored in environment variables.
+
+DevelopmentAid moved to a direct API integration (fetch_developmentaid_api.py)
+and no longer goes through Gmail -- see run_email_pipeline.py.
 """
 import base64
 import logging
@@ -15,13 +18,7 @@ logger = logging.getLogger(__name__)
 
 SCOPES = ["https://www.googleapis.com/auth/gmail.readonly"]
 
-def _build_queries() -> dict:
-    da_sender = os.environ.get("DEVELOPMENTAID_SENDER", "")
-    da_query = f'from:{da_sender} "DevelopmentAid"' if da_sender else '"DevelopmentAid"'
-    return {
-        "devex": "from:alerts@devex.com",
-        "developmentaid": da_query,
-    }
+DEVEX_QUERY = "from:alerts@devex.com"
 
 
 def build_gmail_client():
@@ -125,30 +122,26 @@ def _extract_html(part: dict) -> str:
     return ""
 
 
-def fetch_emails(days: int = 7, limit: int | None = None, source_filter: str = "all") -> list[dict]:
+def fetch_emails(days: int = 7, limit: int | None = None, source_filter: str = "devex") -> list[dict]:
     """
-    Returns list of dicts with keys: source, message_id, subject, email_date, sender, html_body
+    Returns list of dicts with keys: source, message_id, subject, email_date, sender, html_body.
+    Devex is the only remaining email source (see module docstring).
     """
     service = build_gmail_client()
     results = []
 
-    queries = _build_queries()
-    sources = ["devex", "developmentaid"] if source_filter == "all" else [source_filter]
+    messages = search_messages(service, DEVEX_QUERY, days, limit)
+    logger.info("Found %d devex messages", len(messages))
 
-    for source in sources:
-        query = queries[source]
-        messages = search_messages(service, query, days, limit)
-        logger.info("Found %d %s messages", len(messages), source)
+    for m in messages:
+        msg = fetch_message(service, m["id"])
+        meta = parse_message_metadata(msg)
+        html = get_html_body(msg)
 
-        for m in messages:
-            msg = fetch_message(service, m["id"])
-            meta = parse_message_metadata(msg)
-            html = get_html_body(msg)
-
-            results.append({
-                "source": source,
-                **meta,
-                "html_body": html,
-            })
+        results.append({
+            "source": "devex",
+            **meta,
+            "html_body": html,
+        })
 
     return results

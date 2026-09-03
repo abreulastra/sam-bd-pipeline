@@ -32,8 +32,8 @@ def extract_stable_id(url: str) -> str:
     return ""
 
 
-def make_duplicate_key(source: str, title: str, donor: str, country: str, url: str = "") -> str:
-    stable_id = extract_stable_id(url)
+def make_duplicate_key(source: str, title: str, donor: str, country: str, url: str = "", stable_id: str = "") -> str:
+    stable_id = stable_id or extract_stable_id(url)
     if stable_id:
         return f"{normalize_text(source)} | {stable_id}"
 
