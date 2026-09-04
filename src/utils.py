@@ -14,9 +14,14 @@ def opp_url_from_notice(notice_id: str) -> str:
     return f"https://sam.gov/opp/{notice_id}/view" if notice_id else ""
 
 
-# Common scope-defining section headings in tender/grant/ToR documents,
-# checked in order — first match wins.
+# Common scope-defining section headings in tender/grant/ToR documents.
+# Spanish/Portuguese matter as much as English here: the DevelopmentAid and
+# IDB BEO feeds are Latin America-focused, so most documents aren't in
+# English, and an English-only list silently falls back to document-start on
+# the majority of them. Accented and unaccented variants are both listed
+# because PDF text extraction doesn't always preserve accents.
 _EXCERPT_HEADINGS = (
+    # English
     "scope of work",
     "terms of reference",
     "objective",
@@ -24,6 +29,24 @@ _EXCERPT_HEADINGS = (
     "background",
     "purpose",
     "description of services",
+    # Spanish
+    "terminos de referencia",
+    "términos de referencia",
+    "alcance del servicio",
+    "alcance de los servicios",
+    "alcance del trabajo",
+    "objetivo general",
+    "objetivo",
+    "objetivos",
+    "antecedentes",
+    "objeto de la contratacion",
+    "objeto de la contratación",
+    # Portuguese
+    "termos de referencia",
+    "termos de referência",
+    "escopo do trabalho",
+    "objetivo geral",
+    "contexto",
 )
 
 

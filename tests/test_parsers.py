@@ -249,6 +249,24 @@ class TestExtractExcerpt:
         assert "......." not in excerpt
         assert "terms of reference for the assignment" in excerpt
 
+    def test_finds_spanish_heading(self):
+        # LAC-focused feeds are mostly non-English; an English-only heading
+        # list silently falls back to document-start on these.
+        text = (
+            "Fundación Vida\nLicitación PR804C 2025/10\n\n"
+            "TÉRMINOS DE REFERENCIA\n"
+            "Contratación de servicios para la legalización de grupos comunitarios."
+        )
+        excerpt = extract_excerpt(text, max_chars=200)
+        assert excerpt.startswith("TÉRMINOS DE REFERENCIA")
+        assert "legalización de grupos comunitarios" in excerpt
+
+    def test_finds_unaccented_spanish_heading(self):
+        # PDF extraction doesn't always preserve accents.
+        text = "Portada\n\nOBJETIVO GENERAL\nFortalecer las capacidades locales de monitoreo."
+        excerpt = extract_excerpt(text, max_chars=200)
+        assert excerpt.startswith("OBJETIVO GENERAL")
+
     def test_falls_back_to_start_when_no_heading_matches(self):
         text = "This document does not contain any of the tracked section headings at all."
         excerpt = extract_excerpt(text, max_chars=20)

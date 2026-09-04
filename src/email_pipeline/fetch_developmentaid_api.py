@@ -62,9 +62,11 @@ MAX_PDF_CHARS = 8000  # raw-extraction search space, before excerpting
 EXCERPT_CHARS_PER_DOC = 800
 COMBINED_EXCERPT_MAX_CHARS = 1500
 
-# 20 requests/minute -> one every 3s. Enforced on every request (search
-# pages, detail, each document), not just between items.
-MIN_REQUEST_INTERVAL = 3.0
+# 20 requests/minute -> one every 3s. Use 3.5s: exactly 3s sits on the
+# limit with no headroom, and tripping it cost a >12h lockout, not just
+# the rest of the minute. Enforced on every request (search pages, detail,
+# each document), not just between items.
+MIN_REQUEST_INTERVAL = 3.5
 # On a 429, sit out a whole window before retrying.
 RATE_LIMIT_COOLDOWN = 60
 
