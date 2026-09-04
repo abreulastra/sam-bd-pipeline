@@ -6,6 +6,8 @@ import logging
 import os
 import sys
 
+import gspread
+
 # Allow imports from src/ when run as a module
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
@@ -58,20 +60,37 @@ def build_row(opportunity: dict, header: list[str]) -> list:
     return [opportunity.get(h, "") for h in header]
 
 
+def _open_spreadsheet(gc, sheet_url: str | None):
+    if sheet_url:
+        return gc.open_by_url(sheet_url)
+    sheet_id = os.environ.get("GOOGLE_SHEET_ID")
+    if not sheet_id:
+        raise ValueError("Set GOOGLE_SHEET_ID or pass sheet_url")
+    return gc.open_by_key(sheet_id)
+
+
+def load_existing_duplicate_keys(sheet_url: str | None = None) -> set[str]:
+    """
+    Read-only: the duplicateKeys already in the Pipeline tab. Lets a fetcher
+    skip already-ingested items *before* spending API requests on them
+    (see fetch_developmentaid_api -- 20 requests/minute).
+    """
+    gc = build_gspread_client()
+    sh = _open_spreadsheet(gc, sheet_url)
+    try:
+        ws = sh.worksheet(PIPELINE_TAB)
+    except gspread.WorksheetNotFound:
+        return set()
+    return get_existing_duplicate_keys(ws, ws.row_values(1))
+
+
 def append_opportunities(opportunities: list[dict], sheet_url: str | None = None) -> dict:
     """
     Append new opportunities to the Pipeline tab, skipping duplicates.
     Returns a summary dict with counts.
     """
     gc = build_gspread_client()
-
-    if sheet_url:
-        sh = gc.open_by_url(sheet_url)
-    else:
-        sheet_id = os.environ.get("GOOGLE_SHEET_ID")
-        if not sheet_id:
-            raise ValueError("Set GOOGLE_SHEET_ID or pass sheet_url")
-        sh = gc.open_by_key(sheet_id)
+    sh = _open_spreadsheet(gc, sheet_url)
 
     ws = get_or_create_worksheet(sh, PIPELINE_TAB, rows=5000, cols=len(PIPELINE_HEADERS) + 5)
     header = ensure_headers(ws, PIPELINE_HEADERS)

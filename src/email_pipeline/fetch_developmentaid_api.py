@@ -20,6 +20,16 @@ defining heading found, so torText gives sam-bd-agent's scoring more signal
 than just the title/description without dumping raw multi-page PDF text
 into the sheet. Deliberately not used to filter anything out here; that
 judgment stays in sam-bd-agent.
+
+Rate limit: DevelopmentAid allows 20 requests per minute per key (confirmed
+by their support, ops@developmentaid.org, 2026-09-04 -- it isn't in the
+Swagger docs). Exceeding it returned 429s for hours, not just for the rest
+of the minute, so this module (a) spaces every request >= 3s apart, (b) on
+a 429 waits out a full window before retrying, (c) aborts the whole fetch
+if it's still limited after that rather than hammering through hundreds of
+items, and (d) skips items already in the sheet *before* spending detail +
+attachment requests on them -- a 7-day window is ~300 items / ~900 requests
+but only ~1/7 of it is new on any given day.
 """
 import io
 import logging
@@ -30,11 +40,13 @@ from datetime import UTC, datetime, timedelta
 import pdfplumber
 import requests
 
+from email_pipeline.normalize import make_duplicate_key
 from utils import extract_excerpt
 
 logger = logging.getLogger(__name__)
 
 API_BASE = "https://www.developmentaid.org/api/external"
+SOURCE = "DevelopmentAid"
 
 # Latin America & the Caribbean (region) + Mexico (country) -- matches the
 # "LAC Contracts" / "LAC Grants" / "Mexico Contracts" saved searches this
@@ -50,24 +62,60 @@ MAX_PDF_CHARS = 8000  # raw-extraction search space, before excerpting
 EXCERPT_CHARS_PER_DOC = 800
 COMBINED_EXCERPT_MAX_CHARS = 1500
 
+# 20 requests/minute -> one every 3s. Enforced on every request (search
+# pages, detail, each document), not just between items.
+MIN_REQUEST_INTERVAL = 3.0
+# On a 429, sit out a whole window before retrying.
+RATE_LIMIT_COOLDOWN = 60
+
+_next_allowed_time = 0.0
+
+
+class RateLimited(RuntimeError):
+    """DevelopmentAid kept returning 429 even after waiting out a full window."""
+
+
+def _throttle():
+    global _next_allowed_time
+    wait = _next_allowed_time - time.monotonic()
+    if wait > 0:
+        time.sleep(wait)
+    _next_allowed_time = time.monotonic() + MIN_REQUEST_INTERVAL
+
 
 def _request(method, path, api_key, json_body=None, retries=3):
     url = f"{API_BASE}{path}"
     headers = {"X-API-KEY": api_key}
     last_exc = None
     for attempt in range(1, retries + 1):
+        _throttle()
         try:
             r = requests.request(method, url, headers=headers, json=json_body, timeout=45)
-            if r.status_code == 401:
-                raise RuntimeError(f"DevelopmentAid API authentication failed (401): {r.text[:300]}")
-            r.raise_for_status()
-            return r
         except requests.RequestException as exc:
             last_exc = exc
-            status = getattr(exc.response, "status_code", None) if getattr(exc, "response", None) is not None else None
-            if status == 401:
-                raise
             time.sleep((2 ** attempt) + random.random())
+            continue
+
+        if r.status_code == 401:
+            raise RuntimeError(f"DevelopmentAid API authentication failed (401): {r.text[:300]}")
+
+        if r.status_code == 429:
+            last_exc = RateLimited(f"429 on {method} {path}")
+            if attempt < retries:
+                logger.warning(
+                    "DevelopmentAid: 429 on %s %s -- waiting %ds for the rate-limit window to reset",
+                    method, path, RATE_LIMIT_COOLDOWN,
+                )
+                time.sleep(RATE_LIMIT_COOLDOWN + random.random())
+            continue
+
+        if r.status_code >= 500:
+            last_exc = requests.HTTPError(f"{r.status_code} on {method} {path}", response=r)
+            time.sleep((2 ** attempt) + random.random())
+            continue
+
+        r.raise_for_status()  # any other 4xx (e.g. 404 for a withdrawn tender): fail fast, no retry
+        return r
     raise last_exc
 
 
@@ -94,12 +142,17 @@ def _search(kind, api_key, posted_from, posted_till):
         if not batch or len(items) >= total:
             break
         page += 1
-        time.sleep(0.35)
     return items
 
 
 def _fetch_detail(kind, api_key, item_id):
     return _request("GET", f"/{kind}/{item_id}", api_key).json()
+
+
+def duplicate_key_for(kind: str, item_id) -> str:
+    """The Pipeline-tab duplicateKey for a tender/grant, from its DevelopmentAid ID alone."""
+    singular = "tender" if kind == "tenders" else "grant"
+    return make_duplicate_key(SOURCE, "", "", "", stable_id=f"developmentaid-api:{singular}:{item_id}")
 
 
 def _extract_pdf_text(body: bytes, max_chars: int = MAX_PDF_CHARS) -> str:
@@ -141,6 +194,8 @@ def _fetch_documents_text(kind, api_key, item_id, documents) -> tuple[str, list[
                     excerpts.append(excerpt)
             else:
                 logger.debug("DevelopmentAid: skipping non-PDF document %s (%s)", doc_id, content_type)
+        except RateLimited:
+            raise
         except Exception as e:
             logger.warning("DevelopmentAid: failed to fetch document %s for %s %s: %s", doc_id, kind, item_id, e)
     return "\n\n---\n\n".join(excerpts)[:COMBINED_EXCERPT_MAX_CHARS], urls
@@ -175,8 +230,6 @@ def _to_pipeline_row(kind, api_key, detail: dict) -> dict:
     deadline = detail.get("deadline") or ""
     tor_text, doc_urls = _fetch_documents_text(kind, api_key, item_id, detail.get("documents"))
 
-    singular = "tender" if kind == "tenders" else "grant"
-
     return {
         "opportunityTitle": detail.get("name", ""),
         "donorClient": donor,
@@ -188,41 +241,75 @@ def _to_pipeline_row(kind, api_key, detail: dict) -> dict:
         "url": detail.get("url") or "",
         "resourceLinks": "|".join(doc_urls),
         "torText": tor_text,
-        "stableId": f"developmentaid-api:{singular}:{item_id}",
+        "duplicateKey": duplicate_key_for(kind, item_id),
     }
 
 
-def fetch_opportunities(api_key: str, days_back: int = 7) -> list[dict]:
+def fetch_opportunities(
+    api_key: str,
+    days_back: int = 7,
+    skip_keys: set[str] | None = None,
+    limit: int | None = None,
+) -> list[dict]:
     """
     Fetch tenders + grants from DevelopmentAid's API for Latin America & the
     Caribbean + Mexico, posted in the last `days_back` days. Returns
-    Pipeline-tab-compatible dicts (plus a "stableId" key the caller uses to
-    build the duplicateKey).
+    Pipeline-tab-compatible dicts including the duplicateKey.
+
+    `skip_keys` -- duplicateKeys already in the Pipeline tab. Matching items
+    are dropped after the (cheap, paginated) search and before the detail +
+    attachment requests, which is where nearly all of the request budget goes.
+    `limit` -- cap on how many *new* items to fully fetch; useful for a cheap
+    live test against the 20 req/min limit.
     """
+    skip_keys = skip_keys or set()
     posted_from = (datetime.now(UTC) - timedelta(days=days_back)).strftime("%Y-%m-%d")
     posted_till = datetime.now(UTC).strftime("%Y-%m-%d")
 
-    results = []
+    candidates = []
+    skipped = 0
     for kind in ("tenders", "grants"):
         try:
             items = _search(kind, api_key, posted_from, posted_till)
+        except RateLimited as e:
+            logger.error("DevelopmentAid: rate-limited during %s search (%s) -- giving up this run", kind, e)
+            return []
         except Exception as e:
             logger.error("DevelopmentAid %s search failed: %s", kind, e)
             continue
-
-        logger.info("DevelopmentAid: %d %s matched (LAC + Mexico, open/forecast)", len(items), kind)
-
+        matched = 0
         for item in items:
             item_id = item.get("id")
             if not item_id:
                 continue
-            try:
-                detail = _fetch_detail(kind, api_key, item_id)
-            except Exception as e:
-                logger.warning("DevelopmentAid: failed to fetch %s %s detail: %s", kind, item_id, e)
+            matched += 1
+            if duplicate_key_for(kind, item_id) in skip_keys:
+                skipped += 1
                 continue
+            candidates.append((kind, item_id))
+        logger.info("DevelopmentAid: %d %s matched (LAC + Mexico, open/forecast)", matched, kind)
+
+    logger.info(
+        "DevelopmentAid: %d new to fetch, %d already in the sheet (skipped before any detail requests)",
+        len(candidates), skipped,
+    )
+    if limit is not None:
+        candidates = candidates[:limit]
+
+    results = []
+    for kind, item_id in candidates:
+        try:
+            detail = _fetch_detail(kind, api_key, item_id)
             results.append(_to_pipeline_row(kind, api_key, detail))
-            time.sleep(0.2)
+        except RateLimited as e:
+            logger.error(
+                "DevelopmentAid: still rate-limited after cooldown (%s) -- stopping with %d of %d fetched; "
+                "the rest will be picked up on the next run",
+                e, len(results), len(candidates),
+            )
+            break
+        except Exception as e:
+            logger.warning("DevelopmentAid: failed to fetch %s %s: %s", kind, item_id, e)
 
     logger.info("DevelopmentAid API: %d opportunities fetched", len(results))
     return results

@@ -262,3 +262,45 @@ class TestExtractExcerpt:
     def test_empty_text(self):
         assert extract_excerpt("", max_chars=100) == ""
         assert extract_excerpt(None, max_chars=100) == ""
+
+
+class TestDevelopmentAidApiFetch:
+    """
+    fetch_opportunities must drop already-ingested items *before* the detail
+    request -- that's where the 20 req/min budget goes -- and honor `limit`.
+    Network is stubbed out; nothing here touches the real API.
+    """
+
+    def _stub(self, monkeypatch):
+        from email_pipeline import fetch_developmentaid_api as da
+
+        monkeypatch.setattr(da, "_throttle", lambda: None)
+        monkeypatch.setattr(
+            da, "_search",
+            lambda kind, api_key, pf, pt: [{"id": 1}, {"id": 2}] if kind == "tenders" else [{"id": 3}],
+        )
+        fetched = []
+
+        def fake_detail(kind, api_key, item_id):
+            fetched.append((kind, item_id))
+            return {"id": item_id, "name": f"{kind} {item_id}", "documents": []}
+
+        monkeypatch.setattr(da, "_fetch_detail", fake_detail)
+        return da, fetched
+
+    def test_skips_items_already_in_sheet_before_fetching_detail(self, monkeypatch):
+        da, fetched = self._stub(monkeypatch)
+        already = {da.duplicate_key_for("tenders", 1), da.duplicate_key_for("grants", 3)}
+
+        rows = da.fetch_opportunities("key", days_back=1, skip_keys=already)
+
+        assert fetched == [("tenders", 2)]
+        assert [r["duplicateKey"] for r in rows] == [da.duplicate_key_for("tenders", 2)]
+
+    def test_limit_caps_new_items_fetched(self, monkeypatch):
+        da, fetched = self._stub(monkeypatch)
+
+        rows = da.fetch_opportunities("key", days_back=1, skip_keys=set(), limit=1)
+
+        assert len(fetched) == 1
+        assert len(rows) == 1

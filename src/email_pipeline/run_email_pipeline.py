@@ -30,7 +30,7 @@ from email_pipeline.normalize import (
     parse_deadline_iso,
 )
 from email_pipeline.parse_devex import parse_opportunities as parse_devex
-from email_pipeline.write_pipeline_sheet import append_opportunities
+from email_pipeline.write_pipeline_sheet import append_opportunities, load_existing_duplicate_keys
 
 logging.basicConfig(
     level=logging.INFO,
@@ -141,8 +141,18 @@ def main():
         if not da_api_key:
             logger.warning("DEVELOPMENTAID_API_KEY not set — skipping DevelopmentAid")
         else:
+            # Check the sheet first so already-ingested items cost no detail or
+            # attachment requests -- DevelopmentAid allows 20 requests/minute
+            # and most of a 7-day window is items we already have.
+            try:
+                skip_keys = load_existing_duplicate_keys(sheet_url=os.environ.get("SHEET_URL"))
+            except Exception as e:
+                logger.warning("Could not read existing Pipeline keys (%s) -- fetching everything", e)
+                skip_keys = set()
             logger.info("Fetching DevelopmentAid opportunities via API...")
-            da_raw = fetch_developmentaid_api(api_key=da_api_key, days_back=args.days)
+            da_raw = fetch_developmentaid_api(
+                api_key=da_api_key, days_back=args.days, skip_keys=skip_keys, limit=args.limit
+            )
             processed = now_utc_iso()
             today = processed[:10]
             for opp in da_raw:
@@ -168,9 +178,7 @@ def main():
                     "fitScore": "",
                     "fitLabel": "",
                     "reviewSummary": "",
-                    "duplicateKey": make_duplicate_key(
-                        "DevelopmentAid", title, donor, country, stable_id=opp.get("stableId", "")
-                    ),
+                    "duplicateKey": opp["duplicateKey"],
                     "processedAtUTC": processed,
                     "owner": "",
                     "pipelineStatus": "New",
