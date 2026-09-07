@@ -309,8 +309,14 @@ def fetch_opportunities(
             if duplicate_key_for(kind, item_id) in skip_keys:
                 skipped += 1
                 continue
-            candidates.append((kind, item_id))
+            candidates.append((item.get("postedDate") or "", kind, item_id))
         logger.info("DevelopmentAid: %d %s matched (LAC + Mexico, open/forecast)", matched, kind)
+
+    # Oldest first. When the daily quota can't cover the backlog, the items
+    # deferred should be the newest ones -- they'll still be inside the
+    # `days_back` search window on the next run, whereas the oldest are the
+    # ones about to age out of it and be missed entirely.
+    candidates.sort(key=lambda c: c[0])
 
     budget = max(DAILY_TENDER_BUDGET - budget_used_today, 0)
     if limit is not None:
@@ -335,7 +341,7 @@ def fetch_opportunities(
     candidates = candidates[:budget]
 
     results = []
-    for kind, item_id in candidates:
+    for _posted, kind, item_id in candidates:
         try:
             detail = _fetch_detail(kind, api_key, item_id)
             results.append(_to_pipeline_row(kind, api_key, detail))

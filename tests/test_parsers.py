@@ -293,9 +293,14 @@ class TestDevelopmentAidApiFetch:
         from email_pipeline import fetch_developmentaid_api as da
 
         monkeypatch.setattr(da, "_throttle", lambda: None)
+        # Search returns newest-first, as the real API does.
         monkeypatch.setattr(
             da, "_search",
-            lambda kind, api_key, pf, pt: [{"id": 1}, {"id": 2}] if kind == "tenders" else [{"id": 3}],
+            lambda kind, api_key, pf, pt: (
+                [{"id": 1, "postedDate": "2026-09-03"}, {"id": 2, "postedDate": "2026-09-01"}]
+                if kind == "tenders"
+                else [{"id": 3, "postedDate": "2026-09-02"}]
+            ),
         )
         fetched = []
 
@@ -322,6 +327,16 @@ class TestDevelopmentAidApiFetch:
 
         assert len(fetched) == 1
         assert len(rows) == 1
+
+    def test_fetches_oldest_first_so_deferred_items_dont_age_out(self, monkeypatch):
+        # Search returns newest-first; under a budget we must spend it on the
+        # oldest, since those are the ones about to fall out of the search
+        # window. Newest deferred items will still be there next run.
+        da, fetched = self._stub(monkeypatch)
+
+        da.fetch_opportunities("key", days_back=1, skip_keys=set(), limit=2)
+
+        assert fetched == [("tenders", 2), ("grants", 3)]  # 2026-09-01, then 09-02
 
     def test_daily_tender_budget_caps_fetches(self, monkeypatch):
         # The 100 unique tenders/24h membership quota binds before the
