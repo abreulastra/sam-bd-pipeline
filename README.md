@@ -59,7 +59,7 @@ sam-bd-pipeline/
 ├── config/
 │   └── settings.yaml                  # SAM.gov pipeline configuration
 ├── tests/
-│   └── test_parsers.py                # Parser unit tests (24 tests)
+│   └── test_parsers.py                # Parser unit tests (28 tests)
 ├── .github/workflows/
 │   ├── collect.yml                    # SAM.gov daily workflow
 │   ├── pipeline_email_daily.yml       # Email pipeline daily workflow
@@ -248,12 +248,23 @@ DevelopmentAid opportunities used to arrive as forwarded alert emails, parsed fr
 
 For each match, `GET /tenders/{id}` (or `/grants/{id}`) fetches full details — donor, country, description, deadline, and a `documents[]` list — and each attachment (up to 5 per opportunity) is downloaded via `GET /{kind}/{id}/documents/{docId}`, text-extracted with `pdfplumber` (as `fetch_idb_beo.py` does for IDB's ToR PDFs), then reduced to a short heuristic excerpt around the first scope-defining heading (`utils.extract_excerpt`, ~1,500 chars total) before being stored in `torText`.
 
-**Rate limit: 20 requests per minute per key** — confirmed by DevelopmentAid support (`ops@developmentaid.org`), it isn't in their Swagger docs. Exceeding it produced `429`s for *hours*, not just the rest of the minute. `fetch_developmentaid_api.py` therefore:
-- spaces every request ≥ 3s apart (search pages, detail, each document — not just per item),
-- on a `429` waits out a full 60s window before retrying, and aborts the whole run if still limited rather than grinding through hundreds of items (which is what kept the key locked),
-- **checks the Pipeline tab's existing `duplicateKey`s first** and skips already-ingested items before any detail/attachment request. A 7-day window is ~300 items / ~900 requests but only ~1/7 is new on a given day, so this is what makes the daily run fit in a few minutes instead of ~45.
+### Limits
 
-`--limit N` caps how many *new* items get fully fetched — handy for a cheap live test.
+Two separate limits apply, per DevelopmentAid support (`ops@developmentaid.org`):
+
+| Limit | What counts | Notes |
+|---|---|---|
+| **100 unique tenders / rolling 24h** | each `GET /{kind}/{id}` — attachment downloads don't count separately | Membership plan quota. **This is the one that actually binds.** |
+| **30 requests / minute** | every request, searches included | Throttle protection; raised from 20 on 2026-09-05 and now documented in their Swagger page |
+
+A 7-day window is ~320 items, so a backlog necessarily drains over several days. Steady state is ~46 new/day, comfortably inside the quota. `fetch_developmentaid_api.py` therefore:
+
+- spaces every request ≥ 2.2s apart (search pages, detail, each document — not just per item),
+- on a `429` waits out a full 60s window, then aborts the run rather than grinding through hundreds of items (grinding is what previously kept the key locked out for 12+ hours),
+- **checks the Pipeline tab's existing `duplicateKey`s first**, skipping already-ingested items before any detail/attachment request — searches are free against the tender quota, detail fetches aren't, so this is what keeps us inside it, and
+- stops at `DAILY_TENDER_BUDGET` (90, leaving headroom under 100), **counting rows already written today**, so a manual run stacked on the scheduled one can't blow the quota. Deferred items are picked up next run — dedup means nothing is lost by leaving them.
+
+`--limit N` caps new items below whatever the budget allows — handy for a cheap live test.
 
 **Deliberately not used to filter anything.** The attachment text is stored for `sam-bd-agent`'s scoring to use, but every matching opportunity is still written to the sheet regardless of its content — a keyword or content-based hard filter here risks silently dropping a real opportunity that doesn't happen to use the expected terms, the same risk that made the SAM.gov `exclude_agencies` decision (above) require actual data first. If this needs to get more selective later, that's `sam-bd-agent`'s call to make with its existing LLM scoring, not a blocklist in the ingestion layer.
 

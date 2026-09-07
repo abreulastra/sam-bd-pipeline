@@ -322,3 +322,23 @@ class TestDevelopmentAidApiFetch:
 
         assert len(fetched) == 1
         assert len(rows) == 1
+
+    def test_daily_tender_budget_caps_fetches(self, monkeypatch):
+        # The 100 unique tenders/24h membership quota binds before the
+        # per-minute throttle does.
+        da, fetched = self._stub(monkeypatch)
+        monkeypatch.setattr(da, "DAILY_TENDER_BUDGET", 2)
+
+        rows = da.fetch_opportunities("key", days_back=1, skip_keys=set())
+
+        assert len(fetched) == 2
+        assert len(rows) == 2
+
+    def test_budget_already_spent_today_fetches_nothing(self, monkeypatch):
+        da, fetched = self._stub(monkeypatch)
+        monkeypatch.setattr(da, "DAILY_TENDER_BUDGET", 2)
+
+        rows = da.fetch_opportunities("key", days_back=1, skip_keys=set(), budget_used_today=2)
+
+        assert fetched == []
+        assert rows == []

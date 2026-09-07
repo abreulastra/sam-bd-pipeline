@@ -21,15 +21,22 @@ than just the title/description without dumping raw multi-page PDF text
 into the sheet. Deliberately not used to filter anything out here; that
 judgment stays in sam-bd-agent.
 
-Rate limit: DevelopmentAid allows 20 requests per minute per key (confirmed
-by their support, ops@developmentaid.org, 2026-09-04 -- it isn't in the
-Swagger docs). Exceeding it returned 429s for hours, not just for the rest
-of the minute, so this module (a) spaces every request >= 3s apart, (b) on
-a 429 waits out a full window before retrying, (c) aborts the whole fetch
-if it's still limited after that rather than hammering through hundreds of
-items, and (d) skips items already in the sheet *before* spending detail +
-attachment requests on them -- a 7-day window is ~300 items / ~900 requests
-but only ~1/7 of it is new on any given day.
+Two separate limits apply, per DevelopmentAid support (ops@developmentaid.org):
+
+  1. 100 unique tenders per rolling 24h -- a membership plan quota. Each
+     GET /{kind}/{id} counts as one tender; attachment downloads don't count
+     separately. This is the limit that actually binds: a 7-day window is
+     ~320 items, so a backlog has to drain across several days.
+  2. 30 requests per minute -- throttle protection (raised from 20 on
+     2026-09-05, and now documented in their Swagger page).
+
+So this module (a) spaces every request >= 2.2s apart, (b) on a 429 waits
+out a full window before retrying and aborts the run rather than hammering
+through hundreds of items, (c) skips items already in the sheet *before*
+spending detail/attachment requests on them, and (d) stops at
+DAILY_TENDER_BUDGET tenders per day, counting what earlier runs already
+wrote. Deferred items are picked up on the next run -- dedup means nothing
+is lost by leaving them.
 """
 import io
 import logging
@@ -62,13 +69,22 @@ MAX_PDF_CHARS = 8000  # raw-extraction search space, before excerpting
 EXCERPT_CHARS_PER_DOC = 800
 COMBINED_EXCERPT_MAX_CHARS = 1500
 
-# 20 requests/minute -> one every 3s. Use 3.5s: exactly 3s sits on the
-# limit with no headroom, and tripping it cost a >12h lockout, not just
-# the rest of the minute. Enforced on every request (search pages, detail,
-# each document), not just between items.
-MIN_REQUEST_INTERVAL = 3.5
+# 30 requests/minute -> one every 2s. Use 2.2s: sitting exactly on the
+# limit leaves no headroom for a sliding-window counter or clock jitter,
+# and tripping it previously cost a >12h lockout, not just the rest of the
+# minute. Enforced on every request (search pages, detail, each document),
+# not just between items.
+MIN_REQUEST_INTERVAL = 2.2
 # On a 429, sit out a whole window before retrying.
 RATE_LIMIT_COOLDOWN = 60
+
+# The membership plan allows 100 unique tenders per rolling 24h -- a
+# separate, stricter limit than the per-minute throttle, and the one that
+# actually binds: each GET /{kind}/{id} counts as one tender viewed
+# (attachment downloads don't count separately). Stop at 90 so a manual run
+# or a retry can't tip us over; whatever's left is picked up next run, since
+# dedup means nothing is lost by deferring it.
+DAILY_TENDER_BUDGET = 90
 
 _next_allowed_time = 0.0
 
@@ -252,6 +268,7 @@ def fetch_opportunities(
     days_back: int = 7,
     skip_keys: set[str] | None = None,
     limit: int | None = None,
+    budget_used_today: int = 0,
 ) -> list[dict]:
     """
     Fetch tenders + grants from DevelopmentAid's API for Latin America & the
@@ -260,9 +277,13 @@ def fetch_opportunities(
 
     `skip_keys` -- duplicateKeys already in the Pipeline tab. Matching items
     are dropped after the (cheap, paginated) search and before the detail +
-    attachment requests, which is where nearly all of the request budget goes.
-    `limit` -- cap on how many *new* items to fully fetch; useful for a cheap
-    live test against the 20 req/min limit.
+    attachment requests. Searches don't count against the 100 tenders/24h
+    membership quota, detail fetches do, so this is what keeps us inside it.
+    `budget_used_today` -- tenders already fetched today (i.e. rows already
+    written), subtracted from DAILY_TENDER_BUDGET so a manual run stacked on
+    the scheduled one can't blow the quota.
+    `limit` -- hard cap on new items to fetch, below whatever the budget
+    allows; useful for a cheap live test.
     """
     skip_keys = skip_keys or set()
     posted_from = (datetime.now(UTC) - timedelta(days=days_back)).strftime("%Y-%m-%d")
@@ -291,12 +312,27 @@ def fetch_opportunities(
             candidates.append((kind, item_id))
         logger.info("DevelopmentAid: %d %s matched (LAC + Mexico, open/forecast)", matched, kind)
 
-    logger.info(
-        "DevelopmentAid: %d new to fetch, %d already in the sheet (skipped before any detail requests)",
-        len(candidates), skipped,
-    )
+    budget = max(DAILY_TENDER_BUDGET - budget_used_today, 0)
     if limit is not None:
-        candidates = candidates[:limit]
+        budget = min(budget, limit)
+
+    logger.info(
+        "DevelopmentAid: %d new to fetch, %d already in the sheet (skipped before any detail requests); "
+        "daily tender budget %d used / %d, fetching up to %d this run",
+        len(candidates), skipped, budget_used_today, DAILY_TENDER_BUDGET, budget,
+    )
+    if budget == 0:
+        logger.warning(
+            "DevelopmentAid: daily tender quota already spent -- deferring %d item(s) to the next run",
+            len(candidates),
+        )
+        return []
+    if len(candidates) > budget:
+        logger.info(
+            "DevelopmentAid: %d item(s) over budget, deferring them to the next run",
+            len(candidates) - budget,
+        )
+    candidates = candidates[:budget]
 
     results = []
     for kind, item_id in candidates:

@@ -5,6 +5,7 @@ Reuses the existing gspread client from sheets_client.py.
 import logging
 import os
 import sys
+from datetime import datetime, timezone
 
 import gspread
 
@@ -69,19 +70,46 @@ def _open_spreadsheet(gc, sheet_url: str | None):
     return gc.open_by_key(sheet_id)
 
 
-def load_existing_duplicate_keys(sheet_url: str | None = None) -> set[str]:
+def load_pipeline_state(source: str, sheet_url: str | None = None) -> tuple[set[str], int]:
     """
-    Read-only: the duplicateKeys already in the Pipeline tab. Lets a fetcher
-    skip already-ingested items *before* spending API requests on them
-    (see fetch_developmentaid_api -- 20 requests/minute).
+    Read-only, one sheet read. Returns:
+      - every duplicateKey in the Pipeline tab, so a fetcher can skip
+        already-ingested items *before* spending API requests on them, and
+      - how many `source` rows were already written today (UTC).
+
+    The second is for sources under a per-day quota rather than just a rate
+    limit (DevelopmentAid allows 100 unique tenders/24h). Counting what's
+    already in the sheet keeps the budget correct even when a manual run
+    lands on top of the scheduled one.
     """
     gc = build_gspread_client()
     sh = _open_spreadsheet(gc, sheet_url)
     try:
         ws = sh.worksheet(PIPELINE_TAB)
     except gspread.WorksheetNotFound:
-        return set()
-    return get_existing_duplicate_keys(ws, ws.row_values(1))
+        return set(), 0
+
+    values = ws.get_all_values()
+    if not values:
+        return set(), 0
+    header = values[0]
+    keys = get_existing_duplicate_keys(ws, header)
+
+    try:
+        src_i = header.index("source")
+        at_i = header.index("processedAtUTC")
+    except ValueError:
+        return keys, 0
+
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    used_today = sum(
+        1
+        for row in values[1:]
+        if len(row) > max(src_i, at_i)
+        and row[src_i] == source
+        and row[at_i].startswith(today)
+    )
+    return keys, used_today
 
 
 def append_opportunities(opportunities: list[dict], sheet_url: str | None = None) -> dict:
