@@ -59,7 +59,7 @@ sam-bd-pipeline/
 ├── config/
 │   └── settings.yaml                  # SAM.gov pipeline configuration
 ├── tests/
-│   └── test_parsers.py                # Parser unit tests (28 tests)
+│   └── test_parsers.py                # Parser unit tests (29 tests)
 ├── .github/workflows/
 │   ├── collect.yml                    # SAM.gov daily workflow
 │   ├── pipeline_email_daily.yml       # Email pipeline daily workflow
