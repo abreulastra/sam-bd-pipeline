@@ -1,6 +1,11 @@
 worksheet_title: Opportunities
 runlog_title: RunLog
 
+worldbank:
+  days_back: 7         # how far back to look for new notices
+  rows_per_page: 500   # records per API page (max: 1000)
+  srce: "both"         # "both" = WB + IFC; "WB" or "IFC" to narrow
+
 # Curated allowlist of agencies where C230 actually has fit -- codes are
 # CGAC/SAM.gov organizationCode values, verified against SAM.gov's Federal
 # Hierarchy API (api.sam.gov/prod/federalorganizations/v1/orgs) on 2026-08-11.

@@ -41,4 +41,4 @@ jobs:
           GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
           SHEET_URL: ${{ secrets.SHEET_URL }}
         run: |
-          python -m src.email_pipeline.run_email_pipeline --days 7
+          python -m src.email_pipeline.run_email_pipeline --days 7 --source all
