@@ -5,7 +5,7 @@ from datetime import datetime, timedelta, UTC
 import gspread
 from dotenv import load_dotenv
 
-from collect_sam import build_params, build_row, fetch_page
+from collect_sam import build_award_row, build_params, build_row, collect_awards, fetch_page
 from config import get_env, load_config
 from filters import passes_agency_filter, passes_naics_filter
 from sheets_client import (
@@ -36,6 +36,27 @@ REQUIRED_HEADERS = [
     "oppUrl",
     "deadline",
     "resourceLinks",
+    # Award-specific fields — populated when a tracked opportunity is awarded
+    "awardee",
+    "awardAmount",
+    "awardDate",
+]
+
+AWARDS_HEADERS = [
+    "noticeId",
+    "title",
+    "solicitationNumber",
+    "awardDate",
+    "awardee",
+    "awardAmount",
+    "awardNumber",
+    "naicsCode",
+    "fullParentPathName",
+    "agencyCodeQueried",
+    "oppUrl",
+    "relatedOpportunityId",
+    "apiPulledAtUTC",
+    "emailedAtUTC",
 ]
 
 LOG_HEADERS = [
@@ -49,28 +70,44 @@ LOG_HEADERS = [
 ]
 
 
-def recheck_high_priority(ws, header, api_key) -> tuple[int, int]:
+def _extract_award_fields(item: dict) -> dict:
+    """Extract award-specific fields from a SAM.gov API response item."""
+    award = item.get("award") or {}
+    awardee = (award.get("awardee") or {}).get("name") or ""
+    return {
+        "awardee": awardee,
+        "awardAmount": str(award.get("amount") or ""),
+        "awardDate": normalize_date(award.get("date")),
+    }
+
+
+def recheck_high_priority(ws, header, api_key) -> tuple[int, int, int]:
     """
-    Re-fetch already-scored high-fit opportunities by noticeId and, if
-    SAM.gov shows a material change (deadline extended, scope/type changed),
-    update the row and clear fitLabel/reviewSummary/deadlineNote/reviewedAtUTC
-    so sam-bd-agent re-scores it on its next run.
+    Re-fetch already-scored high/medium-fit opportunities by noticeId and:
+    - If SAM.gov shows a material change (deadline, scope), clear fitLabel so
+      sam-bd-agent re-scores it.
+    - If the type has changed to "Award Notice", write award fields (awardee,
+      awardAmount, awardDate) and set fitLabel="awarded" so the agent emails
+      an award alert without re-scoring or deleting the row.
+
+    Returns (checked, updated, awarded).
     """
     needed = ("noticeId", "fitLabel", "postedDate") + DIFF_FIELDS
     if not all(h in header for h in needed):
-        return 0, 0
+        return 0, 0, 0
 
     idx = {h: header.index(h) for h in header}
     vals = ws.get_all_values()
     if len(vals) <= 1:
-        return 0, 0
+        return 0, 0, 0
 
     checked = 0
     updated = 0
+    awarded = 0
 
     for row_number, row in enumerate(vals[1:], start=2):
         fit = row[idx["fitLabel"]].strip().lower() if len(row) > idx["fitLabel"] else ""
-        if fit != "high":
+        if fit not in ("high", "medium"):
             continue
 
         notice_id = row[idx["noticeId"]] if len(row) > idx["noticeId"] else ""
@@ -105,10 +142,30 @@ def recheck_high_priority(ws, header, api_key) -> tuple[int, int]:
             continue
         item = items[0]
 
+        fresh_type = item.get("type") or ""
+        is_now_awarded = fresh_type.lower() == "award notice"
+
+        if is_now_awarded:
+            # Opportunity was awarded — capture who won and mark the row so
+            # the agent emails an alert without re-scoring or deleting it.
+            award_fields = _extract_award_fields(item)
+            cell_updates = [
+                {"range": gspread.utils.rowcol_to_a1(row_number, idx["type"] + 1), "values": [[fresh_type]]},
+                {"range": gspread.utils.rowcol_to_a1(row_number, idx["fitLabel"] + 1), "values": [["awarded"]]},
+            ]
+            for field, value in award_fields.items():
+                if field in idx:
+                    cell_updates.append({"range": gspread.utils.rowcol_to_a1(row_number, idx[field] + 1), "values": [[value]]})
+            ws.batch_update(cell_updates, value_input_option="USER_ENTERED")
+            awarded += 1
+            updated += 1
+            print(f"  Awarded: {notice_id} → {award_fields.get('awardee', 'unknown')}")
+            continue
+
         fresh = {
             "title": item.get("title") or "",
             "naicsCode": str(item.get("naicsCode", "") or "").strip(),
-            "type": item.get("type") or "",
+            "type": fresh_type,
             "deadline": normalize_date(item.get("responseDeadLine")),
         }
 
@@ -129,7 +186,7 @@ def recheck_high_priority(ws, header, api_key) -> tuple[int, int]:
         ws.batch_update(cell_updates, value_input_option="USER_ENTERED")
         updated += 1
 
-    return checked, updated
+    return checked, updated, awarded
 
 
 def main():
@@ -228,8 +285,36 @@ def main():
 
     print(f"Inserted {inserted} new rows at the top." if inserted else "No new rows to insert.")
 
-    checked, updated = recheck_high_priority(ws, header, api_key)
-    print(f"Rechecked {checked} high-priority opportunities, {updated} updated.")
+    checked, updated, awarded = recheck_high_priority(ws, header, api_key)
+    print(f"Rechecked {checked} high/medium opportunities, {updated} updated ({awarded} newly awarded).")
+
+    # ── Awards tab: broad market monitoring ─────────────────────────────────
+    awards_title = config.get("awards_title", "Awards")
+    awards_ws = get_or_create_worksheet(sh, awards_title, rows=2000, cols=20)
+    awards_header = ensure_headers(awards_ws, AWARDS_HEADERS)
+    existing_award_ids = get_existing_ids(awards_ws, awards_header, AWARDS_HEADERS)
+
+    awards_days_back = int(config.get("awards_days_back", days_back))
+    awards_posted_from = now_utc - timedelta(days=awards_days_back)
+
+    new_award_rows = collect_awards(
+        api_key=api_key,
+        agency_codes=agency_codes,
+        exclude_naics=exclude_naics,
+        exclude_agencies=exclude_agencies,
+        posted_from=awards_posted_from,
+        posted_to=posted_to,
+        existing_ids=existing_award_ids,
+        limit=limit,
+        api_pulled_at_utc=api_pulled_at_utc,
+    )
+    if new_award_rows:
+        awards_ws.insert_rows(
+            [[r.get(h, "") for h in awards_header] for r in new_award_rows],
+            row=2,
+            value_input_option="USER_ENTERED",
+        )
+    print(f"Awards tab: {len(new_award_rows)} new award(s) added.")
 
     agencies_str = ",".join(agency_codes) if agency_codes else "ALL"
     notes = "; ".join(f"{k}:{v}" for k, v in per_agency_counts.items() if v > 0) or "no new rows"

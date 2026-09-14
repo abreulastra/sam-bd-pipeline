@@ -43,6 +43,107 @@ def fetch_page(params, retries=3):
     raise last_exc
 
 
+def build_award_row(item, agency_code, api_pulled_at_utc, related_opportunity_id=""):
+    """Build an Awards-tab row from a SAM.gov Award Notice API item."""
+    notice_id = str(item.get("noticeId", "") or "").strip()
+    award = item.get("award") or {}
+    awardee = (award.get("awardee") or {}).get("name") or ""
+    return {
+        "noticeId": notice_id,
+        "title": item.get("title") or "",
+        "solicitationNumber": item.get("solicitationNumber") or "",
+        "awardDate": normalize_date(award.get("date")),
+        "awardee": awardee,
+        "awardAmount": str(award.get("amount") or ""),
+        "awardNumber": str(award.get("number") or ""),
+        "naicsCode": str(item.get("naicsCode", "") or "").strip(),
+        "fullParentPathName": item.get("fullParentPathName") or "",
+        "agencyCodeQueried": agency_code or "ALL",
+        "oppUrl": opp_url_from_notice(notice_id),
+        "relatedOpportunityId": related_opportunity_id,
+        "apiPulledAtUTC": api_pulled_at_utc,
+        "emailedAtUTC": "",
+    }
+
+
+def collect_awards(
+    api_key,
+    agency_codes,
+    exclude_naics,
+    exclude_agencies,
+    posted_from,
+    posted_to,
+    existing_ids,
+    limit,
+    api_pulled_at_utc,
+    max_records=500,
+):
+    """
+    Fetch Award Notice records from SAM.gov for the configured agency codes.
+    Returns a list of Awards-tab-compatible dicts for notices not already in
+    existing_ids.
+    """
+    from filters import passes_agency_filter, passes_naics_filter
+
+    new_rows = []
+    query_codes = agency_codes or [None]
+
+    for agency_code in query_codes:
+        offset = 0
+        total = None
+
+        while True:
+            params = build_params(
+                api_key=api_key,
+                posted_from=posted_from,
+                posted_to=posted_to,
+                organization_code=agency_code,
+                limit=limit,
+                offset=offset,
+            )
+            params["ptype"] = "a"  # Award Notice only
+
+            try:
+                data = fetch_page(params)
+            except Exception as exc:
+                print(f"  Awards fetch failed (agency={agency_code}, offset={offset}): {exc}")
+                break
+
+            if total is None:
+                total = int(data.get("totalRecords", 0))
+
+            items = data.get("opportunitiesData", []) or []
+            if not items:
+                break
+
+            for item in items:
+                notice_id = str(item.get("noticeId", "") or "").strip()
+                if not notice_id or notice_id in existing_ids:
+                    continue
+
+                naics = str(item.get("naicsCode", "") or "").strip()
+                if not passes_naics_filter(naics, exclude_naics):
+                    continue
+
+                full_parent = str(item.get("fullParentPathName", "") or "")
+                if not passes_agency_filter(full_parent, exclude_agencies):
+                    continue
+
+                new_rows.append(build_award_row(item, agency_code, api_pulled_at_utc))
+                existing_ids.add(notice_id)
+
+                if len(new_rows) >= max_records:
+                    break
+
+            offset += limit
+            if len(new_rows) >= max_records or (total is not None and offset >= total):
+                break
+
+            time.sleep(0.35)
+
+    return new_rows
+
+
 def build_row(item, agency_code, api_pulled_at_utc):
     notice_id = str(item.get("noticeId", "") or "").strip()
     naics = str(item.get("naicsCode", "") or "").strip()
