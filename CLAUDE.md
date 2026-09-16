@@ -43,7 +43,9 @@ Related guards — keep them:
 
 - **IDB BEO** (`fetch_idb_beo.py`): the ToR PDFs need session cookies from the same Playwright session that scraped the table, so its PDF reading has to stay here — it can't move to `sam-bd-agent` the way SAM.gov attachment reading did.
 - **Devex**: no API; metadata only, parsed from alert emails. Not developing it further is a decision (2026-09), not an oversight.
-- **SAM.gov**: attachments are passed on as `resourceLinks` (pipe-separated URLs); `sam-bd-agent` downloads and reads them. The pipeline only re-checks rows the agent scored `high` (`recheck_high_priority` in `src/main.py`) so amended notices get re-scored.
+- **SAM.gov**: attachments are passed on as `resourceLinks` (pipe-separated URLs); `sam-bd-agent` downloads and reads them. The pipeline re-checks rows the agent scored `high`/`medium` (`recheck_high_priority` in `src/main.py`) so amended notices get re-scored; when one becomes an Award Notice it only records awardee/amount/date — awards are not emailed.
+- **World Bank** (`fetch_worldbank.py`): excluded from `--source all` since 2026-09-16 — the API ignores `procurement_category`/sort params and has no `publ_date`, so the fetcher pulled the full archive (26k junk rows). Rebuild against the real fields (`noticedate`, `procurement_group`, `notice_type`) and test with `--source worldbank --limit` before re-enabling.
+- **Awards tab**: market-wide SAM.gov award notices, kept as reference data only. The agent doesn't read it.
 - **Attachment text** (`torText`) is a short heuristic excerpt (`extract_excerpt` in `src/utils.py`), not a raw dump. Its heading list covers English, Spanish and Portuguese because most LAC documents aren't in English.
 
 ## Testing

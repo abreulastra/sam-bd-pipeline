@@ -87,8 +87,8 @@ def recheck_high_priority(ws, header, api_key) -> tuple[int, int, int]:
     - If SAM.gov shows a material change (deadline, scope), clear fitLabel so
       sam-bd-agent re-scores it.
     - If the type has changed to "Award Notice", write award fields (awardee,
-      awardAmount, awardDate) and set fitLabel="awarded" so the agent emails
-      an award alert without re-scoring or deleting the row.
+      awardAmount, awardDate) for reference only. fitLabel is left as-is, so
+      the agent neither re-scores, re-emails nor deletes the row.
 
     Returns (checked, updated, awarded).
     """
@@ -109,6 +109,8 @@ def recheck_high_priority(ws, header, api_key) -> tuple[int, int, int]:
         fit = row[idx["fitLabel"]].strip().lower() if len(row) > idx["fitLabel"] else ""
         if fit not in ("high", "medium"):
             continue
+        if (row[idx["type"]] if len(row) > idx["type"] else "").strip().lower() == "award notice":
+            continue  # already recorded as awarded -- nothing left to re-check
 
         notice_id = row[idx["noticeId"]] if len(row) > idx["noticeId"] else ""
         if not notice_id:
@@ -146,12 +148,12 @@ def recheck_high_priority(ws, header, api_key) -> tuple[int, int, int]:
         is_now_awarded = fresh_type.lower() == "award notice"
 
         if is_now_awarded:
-            # Opportunity was awarded — capture who won and mark the row so
-            # the agent emails an alert without re-scoring or deleting it.
+            # Opportunity was awarded — record who won. Don't clear fitLabel:
+            # an award isn't a new opportunity, so it shouldn't be re-scored
+            # or emailed.
             award_fields = _extract_award_fields(item)
             cell_updates = [
                 {"range": gspread.utils.rowcol_to_a1(row_number, idx["type"] + 1), "values": [[fresh_type]]},
-                {"range": gspread.utils.rowcol_to_a1(row_number, idx["fitLabel"] + 1), "values": [["awarded"]]},
             ]
             for field, value in award_fields.items():
                 if field in idx:
