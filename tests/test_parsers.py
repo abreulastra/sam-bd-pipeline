@@ -357,3 +357,92 @@ class TestDevelopmentAidApiFetch:
 
         assert fetched == []
         assert rows == []
+
+
+class TestWorldBankFetch:
+    """
+    The World Bank API silently ignores most query params, so the fetcher
+    must stop at the date cutoff itself, refuse to write anything if the
+    filters stop being honored, and keep only LAC firm-level notices.
+    Network is stubbed out; nothing here touches the real API.
+    """
+
+    def _notice(self, nid, days_ago, country="Colombia", method="QCBS",
+                deadline_in_days=10, group="CS", ntype="Request for Expression of Interest"):
+        from datetime import date, timedelta
+        today = date.today()
+        return {
+            "id": nid,
+            "noticedate": (today - timedelta(days=days_ago)).strftime("%d-%b-%Y"),
+            "procurement_group": group,
+            "notice_type": ntype,
+            "procurement_method_code": method,
+            "procurement_method_name": "Quality And Cost-Based Selection",
+            "project_ctry_name": country,
+            "submission_deadline_date": f"{(today + timedelta(days=deadline_in_days)).isoformat()}T00:00:00Z",
+            "bid_description": f"Evaluation services {nid}",
+            "notice_text": "<p>Background.</p><p><strong>Scope of Work</strong></p><p>Conduct a mid-term evaluation.</p>",
+        }
+
+    def _stub(self, monkeypatch, pages):
+        from email_pipeline import fetch_worldbank as wb
+
+        monkeypatch.setattr(wb, "_throttle", lambda: None)
+        calls = []
+
+        def fake_page(offset):
+            calls.append(offset)
+            i = offset // wb.PAGE_SIZE
+            return pages[i] if i < len(pages) else []
+
+        monkeypatch.setattr(wb, "_get_page", fake_page)
+        return wb, calls
+
+    def test_stops_paging_at_days_back_cutoff(self, monkeypatch):
+        wb, calls = self._stub(monkeypatch, [
+            [self._notice("A", 1), self._notice("B", 9)],
+            [self._notice("C", 10)],
+        ])
+
+        rows = wb.fetch_opportunities(days_back=7)
+
+        assert [r["duplicateKey"] for r in rows] == [wb.duplicate_key_for("A")]
+        assert calls == [0]  # never asked for page 2
+
+    def test_keeps_only_lac_firm_open_new_notices(self, monkeypatch):
+        wb, _ = self._stub(monkeypatch, [[
+            self._notice("keep", 1, country="St. Lucia"),
+            self._notice("indv", 1, method="INDV"),
+            self._notice("africa", 1, country="Kenya"),
+            self._notice("expired", 1, deadline_in_days=-2),
+            self._notice("seen", 1),
+        ]])
+
+        rows = wb.fetch_opportunities(days_back=7, skip_keys={wb.duplicate_key_for("seen")})
+
+        assert [r["duplicateKey"] for r in rows] == [wb.duplicate_key_for("keep")]
+
+    def test_tripwire_writes_nothing_if_filters_ignored(self, monkeypatch):
+        wb, _ = self._stub(monkeypatch, [[
+            self._notice("ok", 1),
+            self._notice("goods", 1, group="GO", ntype="Contract Award"),
+        ]])
+
+        assert wb.fetch_opportunities(days_back=7) == []
+
+    def test_limit_and_max_new_rows_cap_output(self, monkeypatch):
+        wb, _ = self._stub(monkeypatch, [[self._notice(str(i), 1) for i in range(10)]])
+        monkeypatch.setattr(wb, "MAX_NEW_ROWS", 3)
+
+        assert len(wb.fetch_opportunities(days_back=7, limit=2)) == 2
+        assert len(wb.fetch_opportunities(days_back=7)) == 3
+
+    def test_row_mapping(self, monkeypatch):
+        wb, _ = self._stub(monkeypatch, [[self._notice("OP123", 1, deadline_in_days=5)]])
+
+        row = wb.fetch_opportunities(days_back=7)[0]
+
+        assert row["url"] == "https://projects.worldbank.org/en/projects-operations/procurement-detail/OP123"
+        assert len(row["deadlineISO"]) == 10 and row["deadline"] == row["deadlineISO"]
+        assert row["torText"].startswith("Background. Scope of Work Conduct a mid-term evaluation.")
+        assert row["source"] == "World Bank" and row["countryRegion"] == "Colombia"

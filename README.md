@@ -2,7 +2,7 @@
 
 Automated business development pipeline for **C230 Consulting Group**.
 
-Pulls federal contracting opportunities from **SAM.gov**, Devex email alerts, **DevelopmentAid**'s external API, and IDB BEO's procurement site, filters and de-duplicates them, and writes results to a shared **Google Sheet** for daily review.
+Pulls federal contracting opportunities from **SAM.gov**, Devex email alerts, **DevelopmentAid**'s external API, IDB BEO's procurement site, and the **World Bank** procurement API, filters and de-duplicates them, and writes results to a shared **Google Sheet** for daily review.
 
 Opportunity scoring and analysis is handled separately by the [`sam-bd-agent`](https://github.com/abreulastra/sam-bd-agent) repository.
 
@@ -16,6 +16,7 @@ Opportunity scoring and analysis is handled separately by the [`sam-bd-agent`](h
 | Devex email alerts | `Pipeline` | Weekdays, 12:00 PM UTC |
 | DevelopmentAid external API | `Pipeline` | Weekdays, 12:00 PM UTC |
 | IDB BEO procurement scrape | `Pipeline` | Weekdays, 12:00 PM UTC |
+| World Bank procurement API (LAC firm consulting notices) | `Pipeline` | Weekdays, 12:00 PM UTC |
 
 ---
 
@@ -28,7 +29,8 @@ SAM.gov API  ──────────────────→  src/main
 
 Gmail (Devex) ─────────────────┐
 DevelopmentAid API ─────────────┼→  src/email_pipeline/
-IDB BEO web scrape ─────────────┘         ↓
+IDB BEO web scrape ─────────────┤         ↓
+World Bank API ─────────────────┘
                                Google Sheet: Pipeline tab
                                         ↓
                           (analyzed and pruned separately by sam-bd-agent)
@@ -54,12 +56,13 @@ sam-bd-pipeline/
 │       ├── fetch_developmentaid_api.py # DevelopmentAid external API client
 │       ├── parse_developmentaid.py    # Unused — retired in favor of the API client above
 │       ├── fetch_idb_beo.py           # IDB BEO procurement web scrape
+│       ├── fetch_worldbank.py         # World Bank procurement API (LAC consulting REOIs)
 │       ├── normalize.py               # Deduplication and language detection
 │       └── write_pipeline_sheet.py    # Writes to Pipeline tab
 ├── config/
 │   └── settings.yaml                  # SAM.gov pipeline configuration
 ├── tests/
-│   └── test_parsers.py                # Parser unit tests (29 tests)
+│   └── test_parsers.py                # Parser unit tests (34 tests)
 ├── .github/workflows/
 │   ├── collect.yml                    # SAM.gov daily workflow
 │   ├── pipeline_email_daily.yml       # Email pipeline daily workflow
@@ -116,7 +119,7 @@ python -m src.email_pipeline.run_email_pipeline --help
 | `--days` | `7` | Days back to search (Gmail search window / DevelopmentAid `postedFrom`) |
 | `--dry-run` | off | Print results without writing to Sheets |
 | `--limit` | none | Max emails to process (Devex) / max *new* opportunities to fully fetch (DevelopmentAid); IDB BEO ignores it |
-| `--source` | `all` | Filter: `devex`, `developmentaid`, `idbbeo`, or `all` |
+| `--source` | `all` | Filter: `devex`, `developmentaid`, `idbbeo`, `worldbank`, or `all` |
 
 ---
 
@@ -231,9 +234,20 @@ Unrestricted, this returns roughly 8,000+ opportunities/week government-wide bef
 
 SAM.gov opportunities sometimes get amended after they're first posted (deadline extended, scope changed). Since `sam-bd-agent` only scores a row once (skips anything with a `fitLabel` already set) and this pipeline's dedup skips any `noticeId` already ingested, an amendment would otherwise go unnoticed forever.
 
-Each `collect_sam_opportunities` run re-fetches every row where `fitLabel == "high"` directly by `noticeId`, and if SAM.gov's current `title`, `naicsCode`, `type`, or `deadline` differs from what's stored, it updates the row and clears `fitLabel`/`reviewSummary`/`deadlineNote`/`reviewedAtUTC` so `sam-bd-agent` re-scores it on its next run.
+Each `collect_sam_opportunities` run re-fetches every row where `fitLabel` is `high` or `medium` directly by `noticeId`, and if SAM.gov's current `title`, `naicsCode`, `type`, or `deadline` differs from what's stored, it updates the row and clears `fitLabel`/`reviewSummary`/`deadlineNote`/`reviewedAtUTC` so `sam-bd-agent` re-scores it on its next run.
 
 This deliberately does **not** skip rows whose stored deadline has already passed — skipping would mean never discovering that SAM.gov extended a deadline on something already marked expired, which defeats the point. The tradeoff: nothing currently prunes the high-fit set (only low-fit rows get deleted), so this re-check list grows unbounded over time. Not a problem at current volume, but worth revisiting if it ever becomes a real latency/cost concern.
+
+---
+
+## World Bank API
+
+`src/email_pipeline/fetch_worldbank.py` reads `search.worldbank.org/api/v2/procnotices` (public, no key).
+
+- **Scope:** consulting-services (`CS`) Requests for Expression of Interest, firm selections only (individual-consultant `INDV` notices dropped), Latin America & Caribbean only, deadline not past. About 40 notices/month.
+- **The API ignores most query parameters** (`procurement_category`, `srt`, `order`, `strdate`/`enddate`) and has no `publ_date`. Only `*_exact` filters and `rows`/`os` paging work; results come newest-first by `noticedate`. The first version relied on the ignored parameters and pulled 26k archive notices on 2026-09-14/15.
+- **Guards:** stops paging at the `--days` cutoff; at most 10 pages read and 40 new rows per run; if any returned notice isn't a CS REOI (filters no longer honored) it writes nothing and logs an error.
+- `torText` is the opening 1,500 characters of the notice text (project, assignment, services).
 
 ---
 
@@ -300,11 +314,11 @@ Rows are written by **matching each value to the sheet's actual current header, 
 
 Both workflows also carry a `concurrency` block so overlapping runs can't happen — that same 2026-07-16 incident was caused by two runs racing on the header at once.
 
-**`Pipeline` tab** — Devex (email) + DevelopmentAid (API) + IDB BEO (web scrape) opportunities:
+**`Pipeline` tab** — Devex (email) + DevelopmentAid (API) + IDB BEO (web scrape) + World Bank (API) opportunities:
 
 | Column | Description |
 |---|---|
-| `source` | `Devex`, `DevelopmentAid`, or `IDB BEO` |
+| `source` | `Devex`, `DevelopmentAid`, `IDB BEO`, or `World Bank` |
 | `emailDate` | Date the Devex alert email was sent (or fetch date for API/scrape sources) |
 | `alertName` | Devex saved-search name, or `DevelopmentAid API (Tender/Grant)`, or `IDB BEO` |
 | `opportunityTitle` | Opportunity title |

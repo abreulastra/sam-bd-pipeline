@@ -229,13 +229,8 @@ def main():
             })
         logger.info("IDB BEO opportunities extracted: %d", len(beo_raw))
 
-    # ── World Bank Procurement API ───────────────────────────────────────────
-    # Disabled in "all" (2026-09-16): the API ignores the procurement_category
-    # filter and sort order and has no publ_date field, so the 7-day cutoff
-    # never triggers and the fetcher pulls the whole archive back to 2013
-    # (26k rows in two runs). Only runs with an explicit --source worldbank
-    # until fetch_worldbank.py is rebuilt against the real API fields.
-    if args.source == "worldbank":
+    # ── World Bank Procurement API (LAC firm consulting notices) ─────────────
+    if args.source in ("worldbank", "all"):
         logger.info("Fetching World Bank procurement opportunities...")
         try:
             skip_keys, _ = load_pipeline_state("World Bank", sheet_url=os.environ.get("SHEET_URL"))
@@ -259,12 +254,12 @@ def main():
                 "donorClient": opp["donorClient"],
                 "countryRegion": opp["countryRegion"],
                 "opportunityType": opp["opportunityType"],
-                "status": "",
+                "status": opp.get("status", ""),
                 "deadline": opp["deadline"],
                 "deadlineISO": opp["deadlineISO"],
                 "url": opp["url"],
-                "torText": "",
-                "resourceLinks": "",
+                "torText": opp.get("torText", ""),
+                "resourceLinks": opp.get("resourceLinks", ""),
                 "language": opp["language"],
                 "fitScore": "",
                 "fitLabel": "",

@@ -1,11 +1,6 @@
 worksheet_title: Opportunities
 runlog_title: RunLog
 
-worldbank:
-  days_back: 7         # how far back to look for new notices
-  rows_per_page: 500   # records per API page (max: 1000)
-  srce: "both"         # "both" = WB + IFC; "WB" or "IFC" to narrow
-
 awards_title: Awards   # Google Sheet tab name for market-wide award monitoring
 awards_days_back: 14   # how far back to look for new award notices
 

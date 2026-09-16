@@ -1,51 +1,71 @@
 """
-World Bank Procurement API client.
+World Bank procurement notices -> Pipeline tab.
 
-Pulls consulting-services and non-consulting-services solicitations from the
-World Bank's public procurement REST API (no auth required):
+Public API, no auth: https://search.worldbank.org/api/v2/procnotices
 
-    https://search.worldbank.org/api/v2/procnotices
+What the API actually honors (verified live 2026-09-16):
+  - `<field>_exact=` filters, e.g. procurement_group_exact=CS and
+    notice_type_exact=Request for Expression of Interest
+  - `rows` / `os` paging; results come newest-first by `noticedate`
+    ("15-Sep-2026") and stay in that order across pages
+What it silently IGNORES: procurement_category, srt, order, strdate/enddate.
+There is no `publ_date` field. The first version of this fetcher relied on
+those, never hit its date cutoff, and pulled 26k archive notices (back to
+2013) into the sheet.
 
-Filters applied here (coarse pass; fine-grained fit judgement stays in the
-agent):
-  - procurement_category: "Consulting Services" or "Non-Consulting Services"
-    only -- skip "Goods" and "Works" (physical procurement / construction)
-  - notice_type: exclude "Contract Award" -- we only want open solicitations
-  - Published within the last `days_back` days
-  - Deadline not already in the past
+So this version is defensive:
+  - Tripwire: if a returned notice isn't a CS Request for Expression of
+    Interest, or has no parseable noticedate, the filters stopped working --
+    log an error and return nothing rather than write junk.
+  - Hard caps on pages read and rows returned per run.
+  - Filters here: firm selections only (drops INDV = individual consultant),
+    deadline not past, Latin America & Caribbean only.
 
-No rate-limit complications: the endpoint is open and not quota-restricted.
-We paginate with up to `rows_per_page` records per request until we've
-consumed the full result set or exhausted the lookback window.
-
-Deduplication is handled by the caller (run_email_pipeline.py) via the
-Pipeline tab's existing duplicateKey mechanism -- the same pattern used by
-all other pipeline sources.
+Volume at time of writing: ~40 firm consulting notices/month for LAC.
+`notice_text` (full notice HTML) goes into torText as its opening
+TOR_TEXT_CHARS characters -- for REOIs that's the project, assignment title
+and services description. (utils.extract_excerpt isn't used here: it tends to
+land on "Terms of Reference ... can be found at <website>", which has no
+scope.) sam-bd-agent can then score without fetching the page.
 """
 import logging
 import time
-from datetime import UTC, date, datetime, timedelta
+from datetime import date, datetime, timedelta
 
 import requests
+from bs4 import BeautifulSoup
 
-from email_pipeline.normalize import infer_language, make_duplicate_key, parse_deadline_iso
+from email_pipeline.normalize import infer_language, make_duplicate_key
 
 logger = logging.getLogger(__name__)
 
 SOURCE = "World Bank"
 API_BASE = "https://search.worldbank.org/api/v2/procnotices"
+NOTICE_URL = "https://projects.worldbank.org/en/projects-operations/procurement-detail/{id}"
 
-# Categories to include (exact WB API strings)
-INCLUDE_CATEGORIES = {"Consulting Services", "Non-Consulting Services"}
+PROCUREMENT_GROUP = "CS"  # consulting services
+NOTICE_TYPE = "Request for Expression of Interest"
+INDIVIDUAL_METHOD = "INDV"  # Individual Consultant Selection -- jobs, not firm contracts
 
-# Notice types to exclude
-EXCLUDE_NOTICE_TYPES = {"Contract Award"}
-
-ROWS_PER_PAGE = 500
+PAGE_SIZE = 100
+MAX_PAGES = 10       # ~1,000 notices, several weeks of global CS notices
+MAX_NEW_ROWS = 40    # about a month of LAC volume; more in one run means something is wrong
 REQUEST_TIMEOUT = 30
-
-# Light throttle -- the API is open, but be polite
 MIN_REQUEST_INTERVAL = 0.5
+TOR_TEXT_CHARS = 1500
+
+# Matched as substrings of project_ctry_name, which also uses WB region labels
+# ("Caribbean", "OECS Countries", "Latin America") and WB spellings
+# ("St. Lucia", "Bahamas, The", "Venezuela, Republica Bolivariana de").
+LAC_COUNTRY_TERMS = (
+    "latin america", "caribbean", "oecs", "western hemisphere", "central america",
+    "antigua", "argentina", "bahamas", "barbados", "belize", "bolivia", "brazil", "chile",
+    "colombia", "costa rica", "cuba", "dominica", "ecuador", "el salvador", "grenada",
+    "guatemala", "guyana", "haiti", "honduras", "jamaica", "mexico", "nicaragua", "panama",
+    "paraguay", "peru", "st. kitts", "st. lucia", "st. vincent", "saint kitts", "saint lucia",
+    "saint vincent", "suriname", "trinidad", "uruguay", "venezuela",
+)
+
 _next_allowed = 0.0
 
 
@@ -57,65 +77,64 @@ def _throttle():
     _next_allowed = time.monotonic() + MIN_REQUEST_INTERVAL
 
 
-def _get_page(params: dict) -> dict:
+def _get_page(offset: int) -> list[dict]:
     _throttle()
+    params = {
+        "format": "json",
+        "rows": PAGE_SIZE,
+        "os": offset,
+        "procurement_group_exact": PROCUREMENT_GROUP,
+        "notice_type_exact": NOTICE_TYPE,
+    }
     resp = requests.get(API_BASE, params=params, timeout=REQUEST_TIMEOUT)
     resp.raise_for_status()
-    return resp.json()
+    return resp.json().get("procnotices") or []
 
 
-def _parse_date(raw: str) -> date | None:
-    """Parse a WB API date string (YYYY-MM-DD or similar) to a date object."""
-    if not raw:
-        return None
+def _notice_date(notice: dict) -> date | None:
     try:
-        return datetime.strptime(raw[:10], "%Y-%m-%d").date()
+        return datetime.strptime(notice.get("noticedate") or "", "%d-%b-%Y").date()
     except ValueError:
         return None
 
 
-def _notice_url(notice: dict) -> str:
-    """Construct the canonical URL for a WB procurement notice."""
-    # The API sometimes returns a direct URL; fall back to the standard pattern.
-    direct = notice.get("url") or notice.get("link") or ""
-    if direct and direct.startswith("http"):
-        return direct
-    notice_id = notice.get("id", "")
-    if notice_id:
-        return f"https://projects.worldbank.org/en/projects-operations/procurement/buyer?id={notice_id}"
-    return ""
+def _deadline_iso(notice: dict) -> str:
+    raw = notice.get("submission_deadline_date") or ""
+    try:
+        return datetime.strptime(raw[:10], "%Y-%m-%d").date().isoformat()
+    except ValueError:
+        return ""
 
 
-def _normalize(notice: dict) -> dict:
-    """Map a WB API notice dict to a Pipeline-tab-compatible row."""
+def is_lac(country: str) -> bool:
+    c = (country or "").lower()
+    return any(term in c for term in LAC_COUNTRY_TERMS)
+
+
+def duplicate_key_for(notice_id) -> str:
+    return make_duplicate_key(SOURCE, "", "", "", stable_id=f"world-bank:{notice_id}")
+
+
+def _to_pipeline_row(notice: dict) -> dict:
     notice_id = str(notice.get("id", ""))
-    title = notice.get("bid_description") or notice.get("project_name") or ""
-    category = notice.get("procurement_category") or ""
-    notice_type = notice.get("notice_type") or ""
-    country = notice.get("project_ctry_name") or ""
-    # srce field: "WB" = World Bank, "IFC" = IFC, may be absent
-    srce = (notice.get("srce") or "").upper()
-    donor = "IFC" if srce == "IFC" else "World Bank"
-    deadline_raw = notice.get("deadline") or notice.get("deadline_strdate") or ""
-    deadline_iso = parse_deadline_iso(deadline_raw) or (deadline_raw[:10] if len(deadline_raw) >= 10 else "")
-
+    title = (notice.get("bid_description") or notice.get("project_name") or "").strip()
+    notice_text = BeautifulSoup(notice.get("notice_text") or "", "html.parser").get_text(" ", strip=True)
+    deadline_iso = _deadline_iso(notice)
     return {
         "source": SOURCE,
-        "alertName": f"World Bank – {category}" if category else SOURCE,
+        "alertName": f"{SOURCE} API",
         "opportunityTitle": title,
-        "donorClient": donor,
-        "countryRegion": country,
-        "opportunityType": f"{category} / {notice_type}".strip(" /"),
-        "status": "",
-        "deadline": deadline_raw,
+        "donorClient": SOURCE,
+        "countryRegion": notice.get("project_ctry_name") or "",
+        "opportunityType": notice.get("procurement_method_name") or NOTICE_TYPE,
+        "status": notice.get("notice_status") or "",
+        "deadline": deadline_iso,
         "deadlineISO": deadline_iso,
-        "url": _notice_url(notice),
-        "torText": "",
+        "url": NOTICE_URL.format(id=notice_id),
+        "torText": notice_text[:TOR_TEXT_CHARS],
         "resourceLinks": "",
         "language": infer_language(title),
-        "duplicateKey": make_duplicate_key(
-            SOURCE, "", "", "", stable_id=f"world-bank:{notice_id}"
-        ),
+        "duplicateKey": duplicate_key_for(notice_id),
     }
 
 
@@ -123,95 +142,73 @@ def fetch_opportunities(
     days_back: int = 7,
     skip_keys: set[str] | None = None,
     limit: int | None = None,
-    srce: str = "both",
-    rows_per_page: int = ROWS_PER_PAGE,
 ) -> list[dict]:
     """
-    Fetch World Bank procurement notices published in the last `days_back` days.
-    Returns Pipeline-tab-compatible dicts (without the envelope fields like
-    source/processedAtUTC/pipelineStatus -- the caller adds those).
-
-    `skip_keys`  -- duplicateKeys already in the Pipeline tab (pre-dedup).
-    `limit`      -- hard cap on results; useful for testing.
-    `srce`       -- "both" (WB + IFC), "WB", or "IFC".
+    Firm-level consulting REOIs for Latin America & the Caribbean, noticed in
+    the last `days_back` days, not already in the sheet (`skip_keys`), with a
+    deadline that hasn't passed. Returns [] if the API stops honoring filters.
     """
     skip_keys = skip_keys or set()
+    cap = min(limit, MAX_NEW_ROWS) if limit is not None else MAX_NEW_ROWS
     today = date.today()
-    published_from = (today - timedelta(days=days_back)).isoformat()
-
+    cutoff = today - timedelta(days=days_back)
+    counts = {"seen": 0, "individual": 0, "not_lac": 0, "past_deadline": 0, "duplicate": 0}
     results = []
-    total_seen = 0
-    total_skipped_dup = 0
-    total_skipped_past = 0
-    total_skipped_category = 0
 
-    for category in INCLUDE_CATEGORIES:
-        offset = 0
-        while True:
-            params = {
-                "format": "json",
-                "rows": rows_per_page,
-                "os": offset,
-                "srce": srce,
-                "procurement_category": category,
-                "srt": "publ_date",
-                "order": "desc",
-            }
-            try:
-                data = _get_page(params)
-            except Exception as exc:
-                logger.error("World Bank API error (category=%s, offset=%d): %s", category, offset, exc)
-                break
+    for page in range(MAX_PAGES):
+        try:
+            notices = _get_page(page * PAGE_SIZE)
+        except Exception as exc:
+            logger.error("World Bank API error (offset=%d): %s", page * PAGE_SIZE, exc)
+            break
+        if not notices:
+            break
 
-            notices = data.get("procnotices") or []
-            if not notices:
-                break
-
-            for notice in notices:
-                total_seen += 1
-
-                # Stop paging once we're past the lookback window
-                pub_date = _parse_date(notice.get("publ_date") or "")
-                if pub_date and pub_date < today - timedelta(days=days_back):
-                    notices = []  # signal to break outer loop
-                    break
-
-                # Exclude contract awards
-                notice_type = (notice.get("notice_type") or "").strip()
-                if notice_type in EXCLUDE_NOTICE_TYPES:
-                    total_skipped_category += 1
-                    continue
-
-                # Skip past-deadline notices
-                deadline_iso = parse_deadline_iso(
-                    notice.get("deadline") or notice.get("deadline_strdate") or ""
+        reached_cutoff = False
+        for notice in notices:
+            counts["seen"] += 1
+            noticed = _notice_date(notice)
+            if (notice.get("procurement_group") != PROCUREMENT_GROUP
+                    or notice.get("notice_type") != NOTICE_TYPE or noticed is None):
+                logger.error(
+                    "World Bank: API returned a notice outside the requested filters "
+                    "(id=%s group=%s type=%s date=%s) -- filters no longer honored; "
+                    "writing nothing this run.",
+                    notice.get("id"), notice.get("procurement_group"),
+                    notice.get("notice_type"), notice.get("noticedate"),
                 )
-                if deadline_iso:
-                    dl_date = _parse_date(deadline_iso)
-                    if dl_date and dl_date < today:
-                        total_skipped_past += 1
-                        continue
+                return []
+            if noticed < cutoff:
+                reached_cutoff = True
+                break
+            if notice.get("procurement_method_code") == INDIVIDUAL_METHOD:
+                counts["individual"] += 1
+                continue
+            if not is_lac(notice.get("project_ctry_name", "")):
+                counts["not_lac"] += 1
+                continue
+            deadline = _deadline_iso(notice)
+            if deadline and deadline < today.isoformat():
+                counts["past_deadline"] += 1
+                continue
+            if duplicate_key_for(notice.get("id", "")) in skip_keys:
+                counts["duplicate"] += 1
+                continue
 
-                row = _normalize(notice)
-
-                # Dedup
-                if row["duplicateKey"] in skip_keys:
-                    total_skipped_dup += 1
-                    continue
-
-                results.append(row)
-
-                if limit is not None and len(results) >= limit:
-                    logger.info("World Bank: hit limit of %d, stopping", limit)
-                    break
-
-            if not notices or (limit is not None and len(results) >= limit):
+            results.append(_to_pipeline_row(notice))
+            if len(results) >= cap:
+                if limit is None:
+                    logger.warning("World Bank: hit MAX_NEW_ROWS=%d -- stopping early", MAX_NEW_ROWS)
                 break
 
-            offset += rows_per_page
+        if reached_cutoff or len(results) >= cap:
+            break
+    else:
+        logger.warning("World Bank: read MAX_PAGES=%d without reaching the %d-day cutoff", MAX_PAGES, days_back)
 
     logger.info(
-        "World Bank: %d seen | %d new | %d duplicates | %d past deadline | %d excluded type",
-        total_seen, len(results), total_skipped_dup, total_skipped_past, total_skipped_category,
+        "World Bank: %d seen | %d new | %d individual | %d outside LAC | %d past deadline | %d already in sheet",
+        counts["seen"], len(results), counts["individual"], counts["not_lac"],
+        counts["past_deadline"], counts["duplicate"],
     )
     return results
