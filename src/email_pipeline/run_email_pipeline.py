@@ -6,6 +6,7 @@ Sources:
   developmentaid  DevelopmentAid's external API directly (not email --
                   see fetch_developmentaid_api.py)
   idbbeo          IDB BEO procurement web scrape
+  ungm            UN Global Marketplace public notice search (LAC + USA)
 
 Usage:
     python -m src.email_pipeline.run_email_pipeline [--days 7] [--dry-run] [--limit N] [--source devex|developmentaid|idbbeo|all]
@@ -23,6 +24,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from email_pipeline.fetch_developmentaid_api import fetch_opportunities as fetch_developmentaid_api
 from email_pipeline.fetch_gmail import fetch_emails
 from email_pipeline.fetch_idb_beo import fetch_opportunities as fetch_idb_beo
+from email_pipeline.fetch_ungm import fetch_opportunities as fetch_ungm
 from email_pipeline.fetch_worldbank import fetch_opportunities as fetch_worldbank
 from email_pipeline.normalize import (
     infer_language,
@@ -48,7 +50,7 @@ def parse_args():
     p.add_argument("--limit", type=int, default=None, help="Max emails to process per source")
     p.add_argument(
         "--source",
-        choices=["devex", "developmentaid", "idbbeo", "worldbank", "all"],
+        choices=["devex", "developmentaid", "idbbeo", "worldbank", "ungm", "all"],
         default="all",
         help="Filter by source (default: all)",
     )
@@ -270,6 +272,44 @@ def main():
                 "pipelineStatus": "New",
             })
         logger.info("World Bank opportunities extracted: %d", len(wb_raw))
+
+    # ── UNGM (UN Global Marketplace public notice search) ────────────────────
+    if args.source in ("ungm", "all"):
+        logger.info("Fetching UNGM opportunities...")
+        try:
+            skip_keys, _ = load_pipeline_state("UNGM", sheet_url=os.environ.get("SHEET_URL"))
+        except Exception as e:
+            logger.warning("Could not read Pipeline state (%s) -- fetching without a skip list", e)
+            skip_keys = set()
+        ungm_raw = fetch_ungm(days_back=args.days, skip_keys=skip_keys, limit=args.limit)
+        processed = now_utc_iso()
+        today = processed[:10]
+        for opp in ungm_raw:
+            all_opportunities.append({
+                "source": "UNGM",
+                "emailDate": today,
+                "emailSubject": "",
+                "alertName": opp["alertName"],
+                "opportunityTitle": opp["opportunityTitle"],
+                "donorClient": opp["donorClient"],
+                "countryRegion": opp["countryRegion"],
+                "opportunityType": opp["opportunityType"],
+                "status": opp.get("status", ""),
+                "deadline": opp["deadline"],
+                "deadlineISO": opp["deadlineISO"],
+                "url": opp["url"],
+                "torText": opp.get("torText", ""),
+                "resourceLinks": "",
+                "language": opp["language"],
+                "fitScore": "",
+                "fitLabel": "",
+                "reviewSummary": "",
+                "duplicateKey": opp["duplicateKey"],
+                "processedAtUTC": processed,
+                "owner": "",
+                "pipelineStatus": "New",
+            })
+        logger.info("UNGM opportunities extracted: %d", len(ungm_raw))
 
     logger.info("Total opportunities extracted: %d", len(all_opportunities))
 

@@ -446,3 +446,142 @@ class TestWorldBankFetch:
         assert len(row["deadlineISO"]) == 10 and row["deadline"] == row["deadlineISO"]
         assert row["torText"].startswith("Background. Scope of Work Conduct a mid-term evaluation.")
         assert row["source"] == "World Bank" and row["countryRegion"] == "Colombia"
+
+
+# UNGM search responses are HTML table rows, not JSON. This mirrors the live
+# markup (verified 2026-10-05): the first tableCell holds action buttons, then
+# title, deadline, published date, agency, notice type, reference, country.
+UNGM_ROW_TEMPLATE = """
+<div role="row" data-noticeid="{id}" class="tableRow dataRow notice-table">
+  <div role="cell" class="tableCell editable resultOptions">
+    <input type="button" value='Express Interest' data-noticeid="{id}" />
+  </div>
+  <div role="cell" class="tableCell resultTitle">
+    <span class="ungm-title ungm-title--small">{title}</span>
+    <a target='_blank' href='/Public/Notice/{id}'></a>
+  </div>
+  <div role="cell" class="tableCell resultInfo1 deadline" data-description="Deadline">
+    <span>{deadline} 12:00 (GMT -4.00)</span>
+    <span class="remainingDaysToDeadline" style="display:none">5.5</span>
+  </div>
+  <div role="cell" class="tableCell"><span>{published}</span></div>
+  <div role="cell" class="tableCell resultAgency"><span>{agency}</span></div>
+  <div role="cell" class="tableCell"><span><label for='{ntype}'>{ntype}</label></span></div>
+  <div role="cell" class="tableCell resultInfo1" data-description="Reference"><span>{ref}</span></div>
+  <div role="cell" class="tableCell"><span>{country}</span></div>
+</div>
+"""
+
+
+def _ungm_html(notices):
+    return "".join(UNGM_ROW_TEMPLATE.format(**n) for n in notices)
+
+
+def _ungm_notice(nid, published_days_ago=1, deadline_in_days=20,
+                 ntype="Request for proposal", country="Colombia", agency="UNDP"):
+    from datetime import date, timedelta
+    today = date.today()
+    return {
+        "id": nid,
+        "title": f"Evaluation services {nid}",
+        "deadline": (today + timedelta(days=deadline_in_days)).strftime("%d-%b-%Y"),
+        "published": (today - timedelta(days=published_days_ago)).strftime("%d-%b-%Y"),
+        "agency": agency,
+        "ntype": ntype,
+        "ref": f"REF-{nid}",
+        "country": country,
+    }
+
+
+class TestUngmFetch:
+    """
+    The UNGM search is paged HTML behind an anti-forgery token, so the fetcher
+    must parse rows defensively, stop at the date cutoff itself, and refuse to
+    write anything if the markup stops parsing. Network is stubbed out.
+    """
+
+    def _stub(self, monkeypatch, pages, descriptions=True):
+        from email_pipeline import fetch_ungm as ungm
+
+        monkeypatch.setattr(ungm, "_throttle", lambda: None)
+        monkeypatch.setattr(ungm, "_open_session", lambda: (None, "token"))
+        asked = []
+
+        def fake_search(session, token, page, published_from):
+            asked.append(page)
+            return _ungm_html(pages[page]) if page < len(pages) else ""
+
+        monkeypatch.setattr(ungm, "_search_page", fake_search)
+        monkeypatch.setattr(ungm, "_fetch_description",
+                            lambda session, nid: f"Description of {nid}" if descriptions else "")
+        return ungm, asked
+
+    def test_parses_a_search_row(self, monkeypatch):
+        ungm, _ = self._stub(monkeypatch, [[_ungm_notice("316942", country="Panama", agency="FAO")]])
+
+        rows = ungm.fetch_opportunities(days_back=7)
+
+        assert len(rows) == 1
+        row = rows[0]
+        assert row["source"] == "UNGM"
+        assert row["url"] == "https://www.ungm.org/Public/Notice/316942"
+        assert row["countryRegion"] == "Panama"
+        assert row["donorClient"] == "FAO" and row["alertName"] == "UNGM (FAO)"
+        assert row["opportunityType"] == "Request for proposal"
+        assert len(row["deadlineISO"]) == 10
+        assert row["torText"] == "Description of 316942"
+        assert row["duplicateKey"] == ungm.duplicate_key_for("316942")
+
+    def test_skips_individual_consultant_past_deadline_and_known_keys(self, monkeypatch):
+        ungm, _ = self._stub(monkeypatch, [[
+            _ungm_notice("keep"),
+            _ungm_notice("indiv", ntype="Call for individual consultant"),
+            _ungm_notice("expired", deadline_in_days=-3),
+            _ungm_notice("seen"),
+        ]])
+
+        rows = ungm.fetch_opportunities(days_back=7, skip_keys={ungm.duplicate_key_for("seen")})
+
+        assert [r["duplicateKey"] for r in rows] == [ungm.duplicate_key_for("keep")]
+
+    def test_stops_at_cutoff_without_asking_for_more_pages(self, monkeypatch):
+        page0 = [_ungm_notice(str(i)) for i in range(14)] + [_ungm_notice("old", published_days_ago=40)]
+        ungm, asked = self._stub(monkeypatch, [page0, [_ungm_notice("newer")]])
+
+        rows = ungm.fetch_opportunities(days_back=7)
+
+        assert len(rows) == 14 and asked == [0]
+
+    def test_pages_until_a_short_page(self, monkeypatch):
+        full = [_ungm_notice(f"a{i}") for i in range(15)]
+        ungm, asked = self._stub(monkeypatch, [full, [_ungm_notice("b1")]])
+
+        rows = ungm.fetch_opportunities(days_back=7)
+
+        assert len(rows) == 16 and asked == [0, 1]
+
+    def test_tripwire_writes_nothing_when_markup_changes(self, monkeypatch):
+        from email_pipeline import fetch_ungm as ungm
+
+        monkeypatch.setattr(ungm, "_throttle", lambda: None)
+        monkeypatch.setattr(ungm, "_open_session", lambda: (None, "token"))
+        monkeypatch.setattr(ungm, "_search_page",
+                            lambda s, t, p, f: "<div class='somethingElse'>no rows here</div>")
+
+        assert ungm.fetch_opportunities(days_back=7) == []
+
+    def test_limit_and_max_new_rows_cap_output(self, monkeypatch):
+        ungm, _ = self._stub(monkeypatch, [[_ungm_notice(f"n{i}") for i in range(15)]])
+        monkeypatch.setattr(ungm, "MAX_NEW_ROWS", 3)
+
+        assert len(ungm.fetch_opportunities(days_back=7, limit=2)) == 2
+        assert len(ungm.fetch_opportunities(days_back=7)) == 3
+
+    def test_session_failure_returns_nothing(self, monkeypatch):
+        from email_pipeline import fetch_ungm as ungm
+
+        def boom():
+            raise RuntimeError("no token")
+
+        monkeypatch.setattr(ungm, "_open_session", boom)
+        assert ungm.fetch_opportunities(days_back=7) == []

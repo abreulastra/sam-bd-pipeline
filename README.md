@@ -2,7 +2,7 @@
 
 Automated business development pipeline for **C230 Consulting Group**.
 
-Pulls federal contracting opportunities from **SAM.gov**, Devex email alerts, **DevelopmentAid**'s external API, IDB BEO's procurement site, and the **World Bank** procurement API, filters and de-duplicates them, and writes results to a shared **Google Sheet** for daily review.
+Pulls federal contracting opportunities from **SAM.gov**, Devex email alerts, **DevelopmentAid**'s external API, IDB BEO's procurement site, the **World Bank** procurement API, and the **UN Global Marketplace** (UNGM), filters and de-duplicates them, and writes results to a shared **Google Sheet** for daily review.
 
 Opportunity scoring and analysis is handled separately by the [`sam-bd-agent`](https://github.com/abreulastra/sam-bd-agent) repository.
 
@@ -17,6 +17,7 @@ Opportunity scoring and analysis is handled separately by the [`sam-bd-agent`](h
 | DevelopmentAid external API | `Pipeline` | Weekdays, 12:00 PM UTC |
 | IDB BEO procurement scrape | `Pipeline` | Weekdays, 12:00 PM UTC |
 | World Bank procurement API (LAC firm consulting notices) | `Pipeline` | Weekdays, 12:00 PM UTC |
+| UNGM public notice search (LAC + USA) | `Pipeline` | Weekdays, 12:00 PM UTC |
 
 ---
 
@@ -30,7 +31,8 @@ SAM.gov API  ──────────────────→  src/main
 Gmail (Devex) ─────────────────┐
 DevelopmentAid API ─────────────┼→  src/email_pipeline/
 IDB BEO web scrape ─────────────┤         ↓
-World Bank API ─────────────────┘
+World Bank API ─────────────────┤
+UNGM notice search ─────────────┘
                                Google Sheet: Pipeline tab
                                         ↓
                           (analyzed and pruned separately by sam-bd-agent)
@@ -57,12 +59,13 @@ sam-bd-pipeline/
 │       ├── parse_developmentaid.py    # Unused — retired in favor of the API client above
 │       ├── fetch_idb_beo.py           # IDB BEO procurement web scrape
 │       ├── fetch_worldbank.py         # World Bank procurement API (LAC consulting REOIs)
+│       ├── fetch_ungm.py              # UN Global Marketplace notice search (LAC + USA)
 │       ├── normalize.py               # Deduplication and language detection
 │       └── write_pipeline_sheet.py    # Writes to Pipeline tab
 ├── config/
 │   └── settings.yaml                  # SAM.gov pipeline configuration
 ├── tests/
-│   └── test_parsers.py                # Parser unit tests (34 tests)
+│   └── test_parsers.py                # Parser unit tests (41 tests)
 ├── .github/workflows/
 │   ├── collect.yml                    # SAM.gov daily workflow
 │   ├── pipeline_email_daily.yml       # Email pipeline daily workflow
@@ -119,7 +122,7 @@ python -m src.email_pipeline.run_email_pipeline --help
 | `--days` | `7` | Days back to search (Gmail search window / DevelopmentAid `postedFrom`) |
 | `--dry-run` | off | Print results without writing to Sheets |
 | `--limit` | none | Max emails to process (Devex) / max *new* opportunities to fully fetch (DevelopmentAid); IDB BEO ignores it |
-| `--source` | `all` | Filter: `devex`, `developmentaid`, `idbbeo`, `worldbank`, or `all` |
+| `--source` | `all` | Filter: `devex`, `developmentaid`, `idbbeo`, `worldbank`, `ungm`, or `all` |
 
 ---
 
@@ -237,6 +240,17 @@ SAM.gov opportunities sometimes get amended after they're first posted (deadline
 Each `collect_sam_opportunities` run re-fetches every row where `fitLabel` is `high` or `medium` directly by `noticeId`, and if SAM.gov's current `title`, `naicsCode`, `type`, or `deadline` differs from what's stored, it updates the row and clears `fitLabel`/`reviewSummary`/`deadlineNote`/`reviewedAtUTC` so `sam-bd-agent` re-scores it on its next run.
 
 This deliberately does **not** skip rows whose stored deadline has already passed — skipping would mean never discovering that SAM.gov extended a deadline on something already marked expired, which defeats the point. The tradeoff: nothing currently prunes the high-fit set (only low-fit rows get deleted), so this re-check list grows unbounded over time. Not a problem at current volume, but worth revisiting if it ever becomes a real latency/cost concern.
+
+---
+
+## UNGM (UN Global Marketplace)
+
+`src/email_pipeline/fetch_ungm.py` reads the public notice search at [ungm.org/Public/Notice](https://www.ungm.org/Public/Notice) — no account needed.
+
+- **Scope:** notices whose beneficiary country is in Latin America, the Caribbean or the USA (43 country ids, filtered server-side), published within `--days`, deadline not past. Calls for *individual consultants* are dropped — those are jobs, not firm contracts. About 117 notices per 7 days (~17/day).
+- **How the search works:** `GET /Public/Notice` sets a session cookie and carries an anti-forgery token; `POST /Public/Notice/Search` then takes a JSON body and returns **HTML rows**. The request needs the `RequestVerificationToken`, `Origin` and `X-Requested-With` headers or it returns HTTP 400. `PageSize` is fixed at 15 — any other value is rejected — so results are paged.
+- **Guards:** stops at the `--days` cutoff (results are sorted newest-first); at most 25 pages and 60 new rows per run; if the first page yields no parseable rows (markup changed) it writes nothing and logs an error.
+- `torText` is the opening 1,500 characters of the notice's public description page.
 
 ---
 
