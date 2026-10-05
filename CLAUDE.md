@@ -4,7 +4,7 @@
 
 ## This repo's job
 
-Ingest and deduplicate. It **appends** rows to the `Opportunities` (SAM.gov) and `Pipeline` (Devex, DevelopmentAid, IDB BEO, World Bank, UNGM) tabs and **never deletes** them.
+Ingest and deduplicate. It **appends** rows to the `Opportunities` (SAM.gov) and `Pipeline` (Devex, DevelopmentAid, IDB BEO, World Bank, UNGM, CDMX) tabs and **never deletes** them.
 
 Scoring, deleting low-fit rows and sending the email digest all belong to the private `sam-bd-agent` repo, which reads the same Google Sheet. Don't add LLM calls, fit judgments or keyword/content filtering here — that was decided deliberately: a filter at ingestion silently drops opportunities the agent would have scored as viable.
 
@@ -46,6 +46,7 @@ Related guards — keep them:
 - **SAM.gov**: attachments are passed on as `resourceLinks` (pipe-separated URLs); `sam-bd-agent` downloads and reads them. The pipeline re-checks rows the agent scored `high`/`medium` (`recheck_high_priority` in `src/main.py`) so amended notices get re-scored; when one becomes an Award Notice it only records awardee/amount/date — awards are not emailed.
 - **World Bank** (`fetch_worldbank.py`): the API silently ignores most params (`procurement_category`, `srt`, `order`, date ranges) and has no `publ_date` — only `*_exact` filters and `rows`/`os` paging work (newest-first by `noticedate`). The 2026-09-14 version relied on the ignored ones and pulled 26k archive rows. Keep the tripwire (non-CS-REOI notice → write nothing), the page/row caps, and the date cutoff; test changes with `--source worldbank --dry-run` first. Scope is LAC firm consulting REOIs only (Raúl's choice, 2026-09-16).
 - **UNGM** (`fetch_ungm.py`): the search needs a session cookie + `__RequestVerificationToken` from `/Public/Notice`, sent as the `RequestVerificationToken` header with `Origin`/`X-Requested-With`; without them it's a 400. `PageSize` is server-pinned at 15, so it pages. The response is **HTML rows, not JSON** — keep the tripwire (first page unparseable → write nothing), the page/row caps, and the individual-consultant filter. Countries are filtered server-side with ids from the search form's `selNoticeCountry` list (LAC + USA, captured 2026-10-05); re-capture them if UNGM renumbers.
+- **CDMX** (`fetch_cdmx.py`): the **only source filtered by keyword at ingestion** — a deliberate exception to the no-filtering rule, decided with Raúl on 2026-10-05 after measuring the portal: ~11 open tenders at a time (uniforms, sanitation, tree trimming) and ~2 consulting tenders in a whole year. `looks_relevant` keeps consulting/research/evaluation titles and drops goods purchases and clinical services ("estudios de colposcopia" and friends are the main false positives). If C230 ever wants full CDMX coverage, remove that gate rather than widening the regex indefinitely. torText comes from the anexo técnico PDF; keep the pdfminer log silencing or runs drown in CropBox warnings.
 - **Awards tab**: market-wide SAM.gov award notices, kept as reference data only. The agent doesn't read it.
 - **Attachment text** (`torText`) is a short heuristic excerpt (`extract_excerpt` in `src/utils.py`), not a raw dump. Its heading list covers English, Spanish and Portuguese because most LAC documents aren't in English.
 

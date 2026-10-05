@@ -2,7 +2,7 @@
 
 Automated business development pipeline for **C230 Consulting Group**.
 
-Pulls federal contracting opportunities from **SAM.gov**, Devex email alerts, **DevelopmentAid**'s external API, IDB BEO's procurement site, the **World Bank** procurement API, and the **UN Global Marketplace** (UNGM), filters and de-duplicates them, and writes results to a shared **Google Sheet** for daily review.
+Pulls federal contracting opportunities from **SAM.gov**, Devex email alerts, **DevelopmentAid**'s external API, IDB BEO's procurement site, the **World Bank** procurement API, the **UN Global Marketplace** (UNGM), and **Mexico City's** procurement portal, filters and de-duplicates them, and writes results to a shared **Google Sheet** for daily review.
 
 Opportunity scoring and analysis is handled separately by the [`sam-bd-agent`](https://github.com/abreulastra/sam-bd-agent) repository.
 
@@ -18,6 +18,7 @@ Opportunity scoring and analysis is handled separately by the [`sam-bd-agent`](h
 | IDB BEO procurement scrape | `Pipeline` | Weekdays, 12:00 PM UTC |
 | World Bank procurement API (LAC firm consulting notices) | `Pipeline` | Weekdays, 12:00 PM UTC |
 | UNGM public notice search (LAC + USA) | `Pipeline` | Weekdays, 12:00 PM UTC |
+| CDMX procurement portal (consulting-type tenders only) | `Pipeline` | Weekdays, 12:00 PM UTC |
 
 ---
 
@@ -32,7 +33,8 @@ Gmail (Devex) ─────────────────┐
 DevelopmentAid API ─────────────┼→  src/email_pipeline/
 IDB BEO web scrape ─────────────┤         ↓
 World Bank API ─────────────────┤
-UNGM notice search ─────────────┘
+UNGM notice search ─────────────┤
+CDMX procurement portal ────────┘
                                Google Sheet: Pipeline tab
                                         ↓
                           (analyzed and pruned separately by sam-bd-agent)
@@ -60,12 +62,13 @@ sam-bd-pipeline/
 │       ├── fetch_idb_beo.py           # IDB BEO procurement web scrape
 │       ├── fetch_worldbank.py         # World Bank procurement API (LAC consulting REOIs)
 │       ├── fetch_ungm.py              # UN Global Marketplace notice search (LAC + USA)
+│       ├── fetch_cdmx.py              # Mexico City procurement portal (keyword-filtered)
 │       ├── normalize.py               # Deduplication and language detection
 │       └── write_pipeline_sheet.py    # Writes to Pipeline tab
 ├── config/
 │   └── settings.yaml                  # SAM.gov pipeline configuration
 ├── tests/
-│   └── test_parsers.py                # Parser unit tests (41 tests)
+│   └── test_parsers.py                # Parser unit tests (47 tests)
 ├── .github/workflows/
 │   ├── collect.yml                    # SAM.gov daily workflow
 │   ├── pipeline_email_daily.yml       # Email pipeline daily workflow
@@ -122,7 +125,7 @@ python -m src.email_pipeline.run_email_pipeline --help
 | `--days` | `7` | Days back to search (Gmail search window / DevelopmentAid `postedFrom`) |
 | `--dry-run` | off | Print results without writing to Sheets |
 | `--limit` | none | Max emails to process (Devex) / max *new* opportunities to fully fetch (DevelopmentAid); IDB BEO ignores it |
-| `--source` | `all` | Filter: `devex`, `developmentaid`, `idbbeo`, `worldbank`, `ungm`, or `all` |
+| `--source` | `all` | Filter: `devex`, `developmentaid`, `idbbeo`, `worldbank`, `ungm`, `cdmx`, or `all` |
 
 ---
 
@@ -240,6 +243,17 @@ SAM.gov opportunities sometimes get amended after they're first posted (deadline
 Each `collect_sam_opportunities` run re-fetches every row where `fitLabel` is `high` or `medium` directly by `noticeId`, and if SAM.gov's current `title`, `naicsCode`, `type`, or `deadline` differs from what's stored, it updates the row and clears `fitLabel`/`reviewSummary`/`deadlineNote`/`reviewedAtUTC` so `sam-bd-agent` re-scores it on its next run.
 
 This deliberately does **not** skip rows whose stored deadline has already passed — skipping would mean never discovering that SAM.gov extended a deadline on something already marked expired, which defeats the point. The tradeoff: nothing currently prunes the high-fit set (only low-fit rows get deleted), so this re-check list grows unbounded over time. Not a problem at current volume, but worth revisiting if it ever becomes a real latency/cost concern.
+
+---
+
+## CDMX (Mexico City procurement)
+
+`src/email_pipeline/fetch_cdmx.py` reads [concursodigital.finanzas.cdmx.gob.mx](https://concursodigital.finanzas.cdmx.gob.mx/convocatorias_publicas) — open tenders are server-rendered cards, no API.
+
+- **The only keyword-filtered source.** The portal is overwhelmingly goods, works and maintenance: the 11 open tenders when this shipped were uniforms, Metro sanitation and tree trimming, and a year of closed tenders held ~2 that C230 could bid on. Ingesting everything would mean daily noise for a couple of hits a year, so only titles matching consulting/research/evaluation terms are written (`looks_relevant`), minus clinical "estudios"/"consultas" and goods purchases.
+- `torText` comes from the tender's **anexo técnico** PDF when present (that's where the scope is), falling back to the detail page; both PDF links go into `resourceLinks`.
+- **Guards:** `--days` cutoff on the publication date, deadline not past, max 25 new rows per run, and a tripwire that writes nothing if no cards parse.
+- Caveat: CDMX also buys through other channels (Tianguis Digital, direct award) that this portal doesn't show.
 
 ---
 

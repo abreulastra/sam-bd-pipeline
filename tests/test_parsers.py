@@ -585,3 +585,139 @@ class TestUngmFetch:
 
         monkeypatch.setattr(ungm, "_open_session", boom)
         assert ungm.fetch_opportunities(days_back=7) == []
+
+
+# CDMX renders each tender as a bootstrap card; an empty field shows up as two
+# adjacent labels (verified live 2026-10-05).
+CDMX_CARD_TEMPLATE = """
+<div class="card">
+  <div class="card-header text-white gray-07 fs-14 fw-bold">{title}</div>
+  <div class="card-body d-flex flex-column">
+    <span>Fecha de publicación</span><span>{published}</span>
+    <span>Presentación de propuestas</span><span>{deadline} 10:00</span>
+    <span>Tipo de contratación</span><span>{ctype}</span>
+    <span>Carácter</span><span>Nacional</span>
+    <span>Método de contratación</span><span>LP - Licitación Pública</span>
+    <span>Entidad convocante</span><span>{entity}</span>
+    <a href="https://concursodigital.finanzas.cdmx.gob.mx/proveedores/detalle_convocatoria/{id}">Revisar</a>
+  </div>
+</div>
+"""
+
+
+def _cdmx_html(cards):
+    return "<div class='convocatorias_publicas'>" + "".join(
+        CDMX_CARD_TEMPLATE.format(**c) for c in cards
+    ) + "</div>"
+
+
+def _cdmx_card(cid, title, published_days_ago=1, deadline_in_days=10,
+               ctype="Prestación de Servicios", entity="SECRETARÍA DE GOBIERNO"):
+    from datetime import date, timedelta
+    today = date.today()
+    return {
+        "id": cid,
+        "title": title,
+        "published": (today - timedelta(days=published_days_ago)).isoformat(),
+        "deadline": (today + timedelta(days=deadline_in_days)).isoformat(),
+        "ctype": ctype,
+        "entity": entity,
+    }
+
+
+class TestCdmxFetch:
+    """
+    CDMX is the one keyword-filtered source: the portal is mostly goods and
+    maintenance, so only consulting/research/evaluation titles are ingested.
+    Network is stubbed out.
+    """
+
+    def _stub(self, monkeypatch, cards):
+        from email_pipeline import fetch_cdmx as cdmx
+
+        monkeypatch.setattr(cdmx, "_throttle", lambda: None)
+
+        class FakeSession(dict):
+            pass
+
+        def fake_open():
+            s = FakeSession()
+            s.__dict__["_cdmx_list_html"] = _cdmx_html(cards)
+            return s
+
+        monkeypatch.setattr(cdmx, "_open_session", fake_open)
+        monkeypatch.setattr(cdmx, "_fetch_detail",
+                            lambda session, url: ("Objeto de la contratación: ...", ["a.pdf", "anexo_tecnico.pdf"]))
+        return cdmx
+
+    def test_keeps_consulting_titles_and_drops_the_rest(self, monkeypatch):
+        cdmx = self._stub(monkeypatch, [
+            _cdmx_card("c1", "Servicios de consultoría estratégica para estudios de política pública"),
+            _cdmx_card("c2", "SERVICIO DE MANTENIMIENTO DE ARBOLADO Y ÁREAS VERDES"),
+            _cdmx_card("c3", "ADQUISICIÓN DE UNIFORMES Y MATERIAL DIDACTICO", ctype="Adquisición de Bienes"),
+            _cdmx_card("c4", "SERVICIO INTEGRAL DE ESTUDIOS DE COLPOSCOPIA"),
+            _cdmx_card("c5", "Servicio para realizar el diagnóstico del perfil del visitante"),
+        ])
+
+        rows = cdmx.fetch_opportunities(days_back=7)
+
+        assert [r["duplicateKey"] for r in rows] == [
+            cdmx.duplicate_key_for("c1"), cdmx.duplicate_key_for("c5"),
+        ]
+
+    def test_row_mapping(self, monkeypatch):
+        cdmx = self._stub(monkeypatch, [_cdmx_card("NjMwOA==", "Consultoría para evaluación de programas")])
+
+        row = cdmx.fetch_opportunities(days_back=7)[0]
+
+        assert row["source"] == "CDMX" and row["countryRegion"] == "Mexico"
+        assert row["url"].endswith("/detalle_convocatoria/NjMwOA==")
+        assert row["donorClient"] == "SECRETARÍA DE GOBIERNO"
+        assert len(row["deadlineISO"]) == 10
+        assert row["resourceLinks"] == "a.pdf|anexo_tecnico.pdf"
+        assert row["torText"].startswith("Objeto de la contratación")
+
+    def test_skips_old_expired_and_known_rows(self, monkeypatch):
+        cdmx = self._stub(monkeypatch, [
+            _cdmx_card("keep", "Consultoría para evaluación de programas"),
+            _cdmx_card("old", "Consultoría para evaluación de programas", published_days_ago=30),
+            _cdmx_card("expired", "Consultoría para evaluación de programas", deadline_in_days=-2),
+            _cdmx_card("seen", "Consultoría para evaluación de programas"),
+        ])
+
+        rows = cdmx.fetch_opportunities(days_back=7, skip_keys={cdmx.duplicate_key_for("seen")})
+
+        assert [r["duplicateKey"] for r in rows] == [cdmx.duplicate_key_for("keep")]
+
+    def test_blank_publication_date_is_not_read_as_the_next_label(self, monkeypatch):
+        from email_pipeline import fetch_cdmx as cdmx
+
+        card = _cdmx_card("c1", "Consultoría para evaluación")
+        card["published"] = ""
+        parsed = cdmx._parse_cards(_cdmx_html([card]))
+
+        assert parsed[0]["published"] == ""
+        assert parsed[0]["deadline"].startswith("20")
+
+    def test_tripwire_writes_nothing_when_markup_changes(self, monkeypatch):
+        from email_pipeline import fetch_cdmx as cdmx
+
+        monkeypatch.setattr(cdmx, "_throttle", lambda: None)
+
+        class FakeSession(dict):
+            pass
+
+        def fake_open():
+            s = FakeSession()
+            s.__dict__["_cdmx_list_html"] = "<div class='nothing-here'></div>"
+            return s
+
+        monkeypatch.setattr(cdmx, "_open_session", fake_open)
+        assert cdmx.fetch_opportunities(days_back=7) == []
+
+    def test_limit_caps_output(self, monkeypatch):
+        cdmx = self._stub(monkeypatch, [
+            _cdmx_card(f"c{i}", "Consultoría para evaluación de programas") for i in range(6)
+        ])
+
+        assert len(cdmx.fetch_opportunities(days_back=7, limit=2)) == 2
