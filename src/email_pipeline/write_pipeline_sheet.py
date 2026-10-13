@@ -18,6 +18,12 @@ logger = logging.getLogger(__name__)
 
 PIPELINE_TAB = "Pipeline"
 
+# sam-bd-agent logs every opportunity it scores low to this tab (its config
+# key is `rejected_title`) and deletes the row from Pipeline in the same run.
+# Without checking it, a rejected item that's still posted on the source site
+# is re-ingested -- and re-scored -- on every run until it expires.
+REJECTED_TAB = "Rejected"
+
 PIPELINE_HEADERS = [
     "source",
     "emailDate",
@@ -57,6 +63,43 @@ def get_existing_duplicate_keys(ws, header: list[str]) -> set[str]:
     return {row[col_idx] for row in vals[1:] if len(row) > col_idx and row[col_idx]}
 
 
+def get_rejected_duplicate_keys(sh) -> set[str]:
+    """
+    duplicateKeys of Pipeline opportunities the agent already rejected.
+
+    Read-only and never raises: if the tab is missing or unreadable we fall
+    back to the old behaviour (dedupe against Pipeline only) rather than
+    failing the run. The agent prunes this tab (`rejected_retention_days`),
+    so a rejection only suppresses re-ingestion for that long.
+    """
+    try:
+        values = sh.worksheet(REJECTED_TAB).get_all_values()
+    except gspread.WorksheetNotFound:
+        return set()
+    except Exception as e:
+        logger.warning("Could not read %s tab (%s) -- deduping against Pipeline only", REJECTED_TAB, e)
+        return set()
+
+    if len(values) <= 1:
+        return set()
+    header = values[0]
+    try:
+        key_i = header.index("duplicateKey")
+    except ValueError:
+        return set()
+    tab_i = header.index("tab") if "tab" in header else None
+
+    return {
+        row[key_i]
+        for row in values[1:]
+        if len(row) > key_i
+        and row[key_i]
+        # the tab also logs Opportunities (SAM.gov) rejections; those keys
+        # aren't Pipeline duplicateKeys
+        and (tab_i is None or (len(row) > tab_i and row[tab_i] == PIPELINE_TAB))
+    }
+
+
 def build_row(opportunity: dict, header: list[str]) -> list:
     return [opportunity.get(h, "") for h in header]
 
@@ -73,8 +116,9 @@ def _open_spreadsheet(gc, sheet_url: str | None):
 def load_pipeline_state(source: str, sheet_url: str | None = None) -> tuple[set[str], int]:
     """
     Read-only, one sheet read. Returns:
-      - every duplicateKey in the Pipeline tab, so a fetcher can skip
-        already-ingested items *before* spending API requests on them, and
+      - every duplicateKey in the Pipeline tab and in the agent's Rejected
+        log, so a fetcher can skip already-ingested or already-rejected items
+        *before* spending API requests on them, and
       - how many `source` rows were already written today (UTC).
 
     The second is for sources under a per-day quota rather than just a rate
@@ -94,6 +138,9 @@ def load_pipeline_state(source: str, sheet_url: str | None = None) -> tuple[set[
         return set(), 0
     header = values[0]
     keys = get_existing_duplicate_keys(ws, header)
+    # Already-rejected items must be skipped too, or fetchers re-spend API
+    # quota (DevelopmentAid detail fetches) on tenders the agent threw out.
+    keys |= get_rejected_duplicate_keys(sh)
 
     try:
         src_i = header.index("source")
@@ -125,6 +172,9 @@ def append_opportunities(opportunities: list[dict], sheet_url: str | None = None
 
     existing_keys = get_existing_duplicate_keys(ws, header)
     logger.info("Existing duplicate keys in Pipeline tab: %d", len(existing_keys))
+    rejected_keys = get_rejected_duplicate_keys(sh)
+    logger.info("Duplicate keys in Rejected tab (already scored low): %d", len(rejected_keys))
+    existing_keys |= rejected_keys
 
     new_rows = []
     skipped = 0

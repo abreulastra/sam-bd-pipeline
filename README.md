@@ -362,7 +362,7 @@ Both workflows also carry a `concurrency` block so overlapping runs can't happen
 | `pipelineStatus` | Always `New` on first write |
 | `emailedAtUTC` / `fitScore` / `fitLabel` / `reviewSummary` | Filled later by `sam-bd-agent` |
 
-Rows are never overwritten by this pipeline — only appended when the `duplicateKey` is new.
+Rows are never overwritten by this pipeline — only appended when the `duplicateKey` is new. "New" means absent from **both** the `Pipeline` tab and `sam-bd-agent`'s `Rejected` log (Pipeline entries only): the agent deletes low-fit rows from `Pipeline` and records them in `Rejected`, so without that second check a rejected item still posted on its source site would be re-ingested — and re-scored — on every run. Rejections age out of `Rejected` after the agent's `rejected_retention_days` (30), after which an item still posted would be ingested once more.
 
 `sam-bd-agent` will later **delete** any row it scores `fitLabel: low` from both the `Opportunities` and `Pipeline` tabs, right after scoring it — this is the only process that removes rows, and it does so to keep the sheet from growing unbounded with opportunities nobody will act on.
 
