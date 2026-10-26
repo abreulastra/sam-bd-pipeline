@@ -13,7 +13,10 @@ concurrency:
 
 jobs:
   email-pipeline:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    # Pinned: Playwright's `install --with-deps` doesn't support Ubuntu 26.04, and
+    # `ubuntu-latest` moved to it on 2026-10-19 (every run since failed at "Install
+    # dependencies"). Move back to ubuntu-latest only after upgrading Playwright.
 
     steps:
       - name: Check out repo
