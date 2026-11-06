@@ -500,7 +500,7 @@ class TestUngmFetch:
     write anything if the markup stops parsing. Network is stubbed out.
     """
 
-    def _stub(self, monkeypatch, pages, descriptions=True):
+    def _stub(self, monkeypatch, pages, descriptions=True, global_pages=()):
         from email_pipeline import fetch_ungm as ungm
 
         monkeypatch.setattr(ungm, "_throttle", lambda: None)
@@ -511,7 +511,11 @@ class TestUngmFetch:
             asked.append(page)
             return _ungm_html(pages[page]) if page < len(pages) else ""
 
+        def fake_global(session, token, page, published_from):
+            return _ungm_html(global_pages[page]) if page < len(global_pages) else ""
+
         monkeypatch.setattr(ungm, "_search_page", fake_search)
+        monkeypatch.setattr(ungm, "_search_global_page", fake_global)
         monkeypatch.setattr(ungm, "_fetch_description",
                             lambda session, nid: f"Description of {nid}" if descriptions else "")
         return ungm, asked
@@ -559,6 +563,49 @@ class TestUngmFetch:
         rows = ungm.fetch_opportunities(days_back=7)
 
         assert len(rows) == 16 and asked == [0, 1]
+
+    def test_global_pass_keeps_only_multiple_destinations(self, monkeypatch):
+        ungm, _ = self._stub(
+            monkeypatch,
+            [[_ungm_notice("lac1")]],
+            global_pages=[[
+                _ungm_notice("multi", country="Multiple destinations", agency="WHO"),
+                _ungm_notice("jordan", country="Jordan"),
+                _ungm_notice("multi-indiv", country="Multiple destinations",
+                             ntype="Call for individual consultants"),
+                _ungm_notice("lac1", country="Multiple destinations"),  # already found by pass 1
+            ]],
+        )
+
+        rows = ungm.fetch_opportunities(days_back=7)
+
+        assert [r["duplicateKey"] for r in rows] == [
+            ungm.duplicate_key_for("lac1"), ungm.duplicate_key_for("multi")]
+        assert rows[1]["countryRegion"] == "Multiple destinations"
+
+    def test_global_pass_uses_a_shorter_window(self, monkeypatch):
+        ungm, _ = self._stub(
+            monkeypatch,
+            [[_ungm_notice("lac-5d", published_days_ago=5)]],
+            global_pages=[[
+                _ungm_notice("multi-1d", country="Multiple destinations", published_days_ago=1),
+                _ungm_notice("multi-5d", country="Multiple destinations", published_days_ago=5),
+            ]],
+        )
+
+        rows = ungm.fetch_opportunities(days_back=7)
+
+        assert [r["duplicateKey"] for r in rows] == [
+            ungm.duplicate_key_for("lac-5d"), ungm.duplicate_key_for("multi-1d")]
+
+    def test_broken_global_pass_keeps_lac_results(self, monkeypatch):
+        ungm, _ = self._stub(monkeypatch, [[_ungm_notice("lac1")]])
+        monkeypatch.setattr(ungm, "_search_global_page",
+                            lambda s, t, p, f: "<div class='somethingElse'>no rows here</div>")
+
+        rows = ungm.fetch_opportunities(days_back=7)
+
+        assert [r["duplicateKey"] for r in rows] == [ungm.duplicate_key_for("lac1")]
 
     def test_tripwire_writes_nothing_when_markup_changes(self, monkeypatch):
         from email_pipeline import fetch_ungm as ungm

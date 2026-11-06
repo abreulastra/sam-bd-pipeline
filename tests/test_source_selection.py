@@ -6,7 +6,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from email_pipeline.run_email_pipeline import RETIRED_SOURCES, source_wanted
 
-ACTIVE = ("idbbeo", "worldbank", "ungm", "cdmx")
+ACTIVE = ("idbbeo", "worldbank", "worldbankcorp", "ungm", "cdmx")
 
 
 def test_devex_and_developmentaid_are_retired():

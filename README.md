@@ -2,7 +2,7 @@
 
 Automated business development pipeline for **C230 Consulting Group**.
 
-Pulls federal contracting opportunities from **SAM.gov**, IDB BEO's procurement site, the **World Bank** procurement API, the **UN Global Marketplace** (UNGM), and **Mexico City's** procurement portal, filters and de-duplicates them, and writes results to a shared **Google Sheet** for daily review. (Devex and DevelopmentAid were sources until 2026-11 — see [Retired sources](#retired-sources-devex-and-developmentaid).)
+Pulls federal contracting opportunities from **SAM.gov**, IDB BEO's procurement site, the **World Bank** procurement API and its corporate procurement feed (WBG eProcure), the **UN Global Marketplace** (UNGM), and **Mexico City's** procurement portal, filters and de-duplicates them, and writes results to a shared **Google Sheet** for daily review. (Devex and DevelopmentAid were sources until 2026-11 — see [Retired sources](#retired-sources-devex-and-developmentaid).)
 
 Opportunity scoring and analysis is handled separately by the [`sam-bd-agent`](https://github.com/abreulastra/sam-bd-agent) repository.
 
@@ -15,7 +15,8 @@ Opportunity scoring and analysis is handled separately by the [`sam-bd-agent`](h
 | SAM.gov Opportunities API | `Opportunities` | Weekdays, 11:15 AM UTC |
 | IDB BEO procurement scrape | `Pipeline` | Weekdays, 12:00 PM UTC |
 | World Bank procurement API (LAC firm consulting notices) | `Pipeline` | Weekdays, 12:00 PM UTC |
-| UNGM public notice search (LAC + USA) | `Pipeline` | Weekdays, 12:00 PM UTC |
+| WBG eProcure — work the World Bank Group contracts itself (LAC/USA) | `Pipeline` | Weekdays, 12:00 PM UTC |
+| UNGM public notice search (LAC + USA, plus global service notices) | `Pipeline` | Weekdays, 12:00 PM UTC |
 | CDMX procurement portal (consulting-type tenders only) | `Pipeline` | Weekdays, 12:00 PM UTC |
 
 ---
@@ -30,6 +31,7 @@ SAM.gov API  ──────────────────→  src/main
 IDB BEO web scrape ─────────────┬→  src/email_pipeline/
                                 │         ↓
 World Bank API ─────────────────┤
+WBG eProcure feed ──────────────┤
 UNGM notice search ─────────────┤
 CDMX procurement portal ────────┘
                                Google Sheet: Pipeline tab
@@ -58,6 +60,7 @@ sam-bd-pipeline/
 │       ├── parse_developmentaid.py    # Unused — retired in favor of the API client above
 │       ├── fetch_idb_beo.py           # IDB BEO procurement web scrape
 │       ├── fetch_worldbank.py         # World Bank procurement API (LAC consulting REOIs)
+│       ├── fetch_worldbank_corporate.py # WBG eProcure: Bank-executed work (LAC/USA)
 │       ├── fetch_ungm.py              # UN Global Marketplace notice search (LAC + USA)
 │       ├── fetch_cdmx.py              # Mexico City procurement portal (keyword-filtered)
 │       ├── normalize.py               # Deduplication and language detection
@@ -258,9 +261,10 @@ This deliberately does **not** skip rows whose stored deadline has already passe
 
 `src/email_pipeline/fetch_ungm.py` reads the public notice search at [ungm.org/Public/Notice](https://www.ungm.org/Public/Notice) — no account needed.
 
-- **Scope:** notices whose beneficiary country is in Latin America, the Caribbean or the USA (43 country ids, filtered server-side), published within `--days`, deadline not past. Calls for *individual consultants* are dropped — those are jobs, not firm contracts. About 117 notices per 7 days (~17/day).
+- **Scope, pass 1:** notices whose beneficiary country is in Latin America, the Caribbean or the USA (43 country ids, filtered server-side), published within `--days`, deadline not past. Calls for *individual consultants* are dropped — those are jobs, not firm contracts. About 145 notices per 7 days.
+- **Scope, pass 2 (since 2026-11):** global notices. "Multiple destinations" is a label on results, not a country filter option, so this pass searches with **no** country filter, restricted server-side to four UNSPSC service segments — 80 Management/business, 81 Engineering/research, 86 Education/training, 93 Politics/civic affairs (`GLOBAL_SERVICE_UNSPSCS`) — and keeps only rows whose country is "Multiple destinations" or blank. Measured: ~350 notices/week in those segments, ~15 kept after dropping individual-consultant calls. It looks back only `GLOBAL_DAYS_BACK` (3) days — the pipeline runs daily — and pages more slowly (`GLOBAL_EXTRA_DELAY`), because live tests hit a 429 around page 15; a 429 or unparseable page only ends this pass, never the LAC one.
 - **How the search works:** `GET /Public/Notice` sets a session cookie and carries an anti-forgery token; `POST /Public/Notice/Search` then takes a JSON body and returns **HTML rows**. The request needs the `RequestVerificationToken`, `Origin` and `X-Requested-With` headers or it returns HTTP 400. `PageSize` is fixed at 15 — any other value is rejected — so results are paged.
-- **Guards:** stops at the `--days` cutoff (results are sorted newest-first); at most 25 pages and 60 new rows per run; if the first page yields no parseable rows (markup changed) it writes nothing and logs an error.
+- **Guards:** stops at the `--days` cutoff (results are sorted newest-first); at most 25 pages (pass 1) / 40 pages (pass 2) and 60 new rows per run; if pass 1's first page yields no parseable rows (markup changed) it writes nothing and logs an error.
 - `torText` is the opening 1,500 characters of the notice's public description page.
 
 ---
@@ -273,6 +277,18 @@ This deliberately does **not** skip rows whose stored deadline has already passe
 - **The API ignores most query parameters** (`procurement_category`, `srt`, `order`, `strdate`/`enddate`) and has no `publ_date`. Only `*_exact` filters and `rows`/`os` paging work; results come newest-first by `noticedate`. The first version relied on the ignored parameters and pulled 26k archive notices on 2026-09-14/15.
 - **Guards:** stops paging at the `--days` cutoff; at most 10 pages read and 40 new rows per run; if any returned notice isn't a CS REOI (filters no longer honored) it writes nothing and logs an error.
 - `torText` is the opening 1,500 characters of the notice text (project, assignment, services).
+
+---
+
+## WBG eProcure (World Bank Group corporate procurement)
+
+`src/email_pipeline/fetch_worldbank_corporate.py` — source `WBG Corporate`. A different channel from the API above: that one carries notices *borrowing governments* issue for WB-financed projects; this one carries studies, evaluations and analytics the **World Bank Group itself** contracts (IBRD/IDA, IFC, CGAP…). Before 2026-11 these only reached us through DevelopmentAid/Devex.
+
+- **Source:** the public listing at [wbgeprocure-rfxnow.worldbank.org](https://wbgeprocure-rfxnow.worldbank.org/rfxnow/public/advertisement/index.html) loads every *active* advertisement from one JSON document, `/rfxnow/json/advertisement/activeAdvertisements.json` — no account, cookie or token. ~25 ads are active worldwide at a time, so there's no paging and no date window.
+- **Geography:** LAC + USA. The country is not a field — it's an "Assignment Countries:" line inside the ad's HTML, in varying layouts, sometimes missing or "Not Country Related". Ads with a parsed non-LAC country are dropped; ads with no country line are dropped only if they name a non-LAC country and no LAC/USA place (cities count: the Montevideo BRT ad never says "Uruguay"); anything else is kept with a blank `countryRegion` for `sam-bd-agent` to judge.
+- **Guards:** if feed items stop having `procurementNumber`/`procurementTitle`, or the feed suddenly has far more than ~25 items, it writes nothing and logs an error. At most 60 rows per run.
+- **Privacy:** the JSON also includes WBG staff names and e-mails. Only the title, number, dates, countries and ad text are read.
+- `torText` is the ad text after "ASSIGNMENT DESCRIPTION" (first 1,500 characters).
 
 ---
 
@@ -360,7 +376,7 @@ Both workflows also carry a `concurrency` block so overlapping runs can't happen
 | `opportunityType` | `Tenders & Grants`, `Tender`, `Grant`, or a sub-sector string (IDB BEO) |
 | `deadline` / `deadlineISO` | Submission deadline, raw and parsed |
 | `url` | Link to the opportunity |
-| `torText` | Extracted attachment/document text (DevelopmentAid, IDB BEO) — informational only, not used to filter rows; `sam-bd-agent`'s scoring is the judgment call |
+| `torText` | Extracted attachment/document text (IDB BEO ToR as PDF or Word, World Bank, WBG eProcure, UNGM, CDMX; DevelopmentAid while it was live) — informational only, not used to filter rows; `sam-bd-agent`'s scoring is the judgment call |
 | `resourceLinks` | Pipe-separated attachment download URLs (DevelopmentAid — requires `DEVELOPMENTAID_API_KEY` to actually download) |
 | `language` | `English` or `Spanish` (auto-detected) |
 | `duplicateKey` | Deterministic key for deduplication |

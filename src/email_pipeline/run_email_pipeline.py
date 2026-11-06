@@ -7,6 +7,7 @@ Sources:
                   see fetch_developmentaid_api.py)                  [RETIRED]
   idbbeo          IDB BEO procurement web scrape
   worldbank       World Bank procurement API (LAC firm consulting REOIs)
+  worldbankcorp   WBG eProcure: work the World Bank Group contracts itself
   ungm            UN Global Marketplace public notice search (LAC + USA)
   cdmx            Mexico City procurement portal (consulting-type tenders only)
 
@@ -32,6 +33,7 @@ from email_pipeline.fetch_cdmx import fetch_opportunities as fetch_cdmx
 from email_pipeline.fetch_idb_beo import fetch_opportunities as fetch_idb_beo
 from email_pipeline.fetch_ungm import fetch_opportunities as fetch_ungm
 from email_pipeline.fetch_worldbank import fetch_opportunities as fetch_worldbank
+from email_pipeline.fetch_worldbank_corporate import fetch_opportunities as fetch_worldbank_corporate
 from email_pipeline.normalize import (
     infer_language,
     make_duplicate_key,
@@ -69,7 +71,7 @@ def parse_args():
     p.add_argument("--limit", type=int, default=None, help="Max emails to process per source")
     p.add_argument(
         "--source",
-        choices=["devex", "developmentaid", "idbbeo", "worldbank", "ungm", "cdmx", "all"],
+        choices=["devex", "developmentaid", "idbbeo", "worldbank", "worldbankcorp", "ungm", "cdmx", "all"],
         default="all",
         help="Filter by source (default: all)",
     )
@@ -294,6 +296,34 @@ def main():
                 "pipelineStatus": "New",
             })
         logger.info("World Bank opportunities extracted: %d", len(wb_raw))
+
+    # ── WBG eProcure (World Bank Group corporate / Bank-executed work) ───────
+    if source_wanted(args.source, "worldbankcorp"):
+        logger.info("Fetching WBG corporate procurement opportunities...")
+        try:
+            skip_keys, _ = load_pipeline_state("WBG Corporate", sheet_url=os.environ.get("SHEET_URL"))
+        except Exception as e:
+            logger.warning("Could not read Pipeline state (%s) -- fetching without a skip list", e)
+            skip_keys = set()
+        wbc_raw = fetch_worldbank_corporate(skip_keys=skip_keys, limit=args.limit)
+        processed = now_utc_iso()
+        today = processed[:10]
+        for opp in wbc_raw:
+            all_opportunities.append({
+                **{k: opp.get(k, "") for k in (
+                    "source", "alertName", "opportunityTitle", "donorClient", "countryRegion",
+                    "opportunityType", "status", "deadline", "deadlineISO", "url", "torText",
+                    "resourceLinks", "language", "duplicateKey")},
+                "emailDate": today,
+                "emailSubject": "",
+                "fitScore": "",
+                "fitLabel": "",
+                "reviewSummary": "",
+                "processedAtUTC": processed,
+                "owner": "",
+                "pipelineStatus": "New",
+            })
+        logger.info("WBG corporate opportunities extracted: %d", len(wbc_raw))
 
     # ── UNGM (UN Global Marketplace public notice search) ────────────────────
     if source_wanted(args.source, "ungm"):

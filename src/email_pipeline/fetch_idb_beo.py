@@ -6,14 +6,21 @@ The table is JavaScript-rendered and the ToR PDFs require session cookies
 set by the BEO page. We use a single Playwright session to:
   1. Load the BEO page (establishes cookies)
   2. Scrape the opportunity table
-  3. Download each ToR PDF in the same session and extract its text
+  3. Download each ToR in the same session and extract its text
 
-The extracted ToR text is stored in the `reviewSummary` column so the agent
-can use it directly when scoring without needing to re-fetch.
+ToRs come as PDF or Word (.docx); the type is detected from the bytes, not
+the header. Some sit behind an IDB/Microsoft login and can't be read
+publicly; an occasional HTML page instead of the file is transient and is
+retried once (both seen live 2026-11-06).
+
+The extracted ToR text is stored in the `torText` column so the agent can
+use it directly when scoring without needing to re-fetch.
 """
+import html
 import io
 import re
 import logging
+import zipfile
 import pdfplumber
 from bs4 import BeautifulSoup
 from playwright.sync_api import sync_playwright
@@ -54,6 +61,37 @@ def _extract_meta(row_text: str) -> tuple[str, str]:
     if m:
         country = m.group(1).strip()
     return sub_sector, country
+
+
+def _extract_docx_text(body: bytes, max_chars: int = MAX_PDF_CHARS) -> str:
+    """Text of a Word .docx (a zip with word/document.xml), stdlib only."""
+    try:
+        with zipfile.ZipFile(io.BytesIO(body)) as z:
+            xml = z.read("word/document.xml").decode("utf-8", "replace")
+    except Exception as e:
+        logger.warning("DOCX text extraction failed: %s", e)
+        return ""
+    paragraphs = []
+    for para in re.split(r"</w:p>", xml):
+        runs = re.findall(r"<w:t(?:\s[^>]*)?>([^<]*)</w:t>", para)
+        if runs:
+            paragraphs.append(html.unescape("".join(runs)))
+    return "\n".join(p for p in paragraphs if p.strip())[:max_chars]
+
+
+def _document_kind(body: bytes, content_type: str) -> str:
+    """'pdf', 'docx', or '' -- by magic bytes first, header second."""
+    if body[:5] == b"%PDF-" or "pdf" in content_type:
+        return "pdf"
+    if body[:2] == b"PK" and b"word/document.xml" in body[:4000]:
+        return "docx"
+    if "wordprocessingml" in content_type:
+        return "docx"
+    return ""
+
+
+def _is_login_page(url: str) -> bool:
+    return "login.microsoftonline.com" in url or "/oauth2/" in url
 
 
 def _extract_pdf_text(body: bytes, max_chars: int = MAX_PDF_CHARS) -> str:
@@ -211,21 +249,28 @@ def fetch_opportunities() -> list[dict]:
                 return []
             logger.info("IDB BEO: found %d opportunity links", len(rows))
 
-            # Step 3: Download each ToR PDF using the live session (cookies intact)
+            # Step 3: Download each ToR using the live session (cookies intact)
             for row in rows:
                 try:
-                    resp = page.request.get(row["url"])
-                    if resp.status == 200 and "pdf" in resp.headers.get("content-type", "").lower():
-                        text = _extract_pdf_text(resp.body())
+                    for attempt in (1, 2):
+                        resp = page.request.get(row["url"])
+                        body = resp.body()
+                        ctype = resp.headers.get("content-type", "").lower()
+                        kind = _document_kind(body, ctype) if resp.status == 200 else ""
+                        if kind or _is_login_page(resp.url) or attempt == 2:
+                            break
+                        page.wait_for_timeout(2000)  # transient HTML page instead of the file
+
+                    if kind:
+                        text = (_extract_pdf_text if kind == "pdf" else _extract_docx_text)(body)
                         row["torText"] = text
-                        logger.info(
-                            "IDB BEO ToR read: %s (%d chars)",
-                            row["selectionId"], len(text)
-                        )
+                        logger.info("IDB BEO ToR read: %s (%s, %d chars)", row["selectionId"], kind, len(text))
+                    elif _is_login_page(resp.url):
+                        logger.info("IDB BEO ToR not public (needs IDB login): %s", row["selectionId"])
                     else:
                         logger.warning(
-                            "IDB BEO ToR fetch failed: %s — status %d",
-                            row["selectionId"], resp.status
+                            "IDB BEO ToR fetch failed: %s — status %d | type %r | url %s | %d bytes | starts %r",
+                            row["selectionId"], resp.status, ctype, resp.url[:120], len(body), body[:80],
                         )
                 except Exception as e:
                     logger.warning("IDB BEO ToR error for %s: %s", row["selectionId"], e)

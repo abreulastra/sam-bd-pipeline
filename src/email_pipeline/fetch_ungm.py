@@ -64,6 +64,32 @@ COUNTRY_IDS = [
     2497, 2501, 2508, 2509, 2512, 2514, 2515,
 ]
 
+# Second pass (2026-11): global notices. The country filter can't target
+# them -- "Multiple destinations" is a label on results, not a filter option --
+# so this pass searches with NO country filter, restricted to four UNSPSC
+# service segments (UNGM tree node ids from /UNSPSC/Children/109), and keeps
+# only rows whose country is "Multiple destinations" or blank. Measured live
+# 2026-11-06: ~350 notices/7 days in these segments (~24 pages), ~23 of them
+# multi-country, ~15 after dropping individual-consultant calls. A server-side
+# *category* filter like the World Bank fetcher's procurement_group=CS, not a
+# keyword filter.
+GLOBAL_SERVICE_UNSPSCS = [
+    107363,  # 80000000 Management and Business Professionals and Administrative Services
+    107371,  # 81000000 Engineering and Research and Technology Based Services
+    107413,  # 86000000 Education and Training Services
+    107433,  # 93000000 Politics and Civic Affairs Services
+]
+MAX_GLOBAL_PAGES = 40
+# The global pass adds ~25 search requests to the ~10 of the LAC pass. At the
+# 1s base interval a live test got a 429 on page 14 (2026-11-06), so global
+# pages wait this much longer. A 429 still only ends the global pass.
+GLOBAL_EXTRA_DELAY = 1.5
+# The pipeline runs daily, so the global pass doesn't need the full `--days`
+# window: 3 days (~150 notices, ~10 pages instead of ~24) still covers one
+# missed run. A repeat test from a busy IP got a 429 on page 15 even at 2.5s.
+GLOBAL_DAYS_BACK = 3
+MULTI_COUNTRY_RE = re.compile(r"multiple destinations|^\s*$", re.I)
+
 _next_allowed = 0.0
 
 
@@ -90,7 +116,8 @@ def _open_session() -> tuple[requests.Session, str]:
     return session, match.group(1)
 
 
-def _search_page(session: requests.Session, token: str, page: int, published_from: str) -> str:
+def _search(session: requests.Session, token: str, page: int, published_from: str,
+            countries: list, unspscs: list) -> str:
     _throttle()
     payload = {
         "PageIndex": page,
@@ -98,7 +125,7 @@ def _search_page(session: requests.Session, token: str, page: int, published_fro
         "Title": "", "Description": "", "Reference": "",
         "PublishedFrom": published_from, "PublishedTo": "",
         "DeadlineFrom": "", "DeadlineTo": "",
-        "Countries": COUNTRY_IDS, "Agencies": [], "UNSPSCs": [], "NoticeTypes": [],
+        "Countries": countries, "Agencies": [], "UNSPSCs": unspscs, "NoticeTypes": [],
         "SortField": "DatePublished", "SortAscending": False,
         "isPicker": False, "IsSustainable": False, "IsActive": True,
         "NoticeDisplayType": None, "NoticeSearchTotalLabelId": "noticeSearchTotal",
@@ -117,6 +144,17 @@ def _search_page(session: requests.Session, token: str, page: int, published_fro
     )
     resp.raise_for_status()
     return resp.text
+
+
+def _search_page(session: requests.Session, token: str, page: int, published_from: str) -> str:
+    """Pass 1: LAC + USA beneficiary countries, every category."""
+    return _search(session, token, page, published_from, COUNTRY_IDS, [])
+
+
+def _search_global_page(session: requests.Session, token: str, page: int, published_from: str) -> str:
+    """Pass 2: no country filter, service segments only (see GLOBAL_SERVICE_UNSPSCS)."""
+    time.sleep(GLOBAL_EXTRA_DELAY)
+    return _search(session, token, page, published_from, [], GLOBAL_SERVICE_UNSPSCS)
 
 
 def _parse_rows(html: str) -> list[dict]:
@@ -202,47 +240,23 @@ def _to_pipeline_row(notice: dict, description: str) -> dict:
     }
 
 
-def fetch_opportunities(
-    days_back: int = 7,
-    skip_keys: set[str] | None = None,
-    limit: int | None = None,
-    fetch_descriptions: bool = True,
-) -> list[dict]:
+def _scan(search_page, session, token, cutoff, today, max_pages, keep, skip_keys,
+          results, cap, counts, fetch_descriptions, label) -> bool:
     """
-    UNGM notices for Latin America, the Caribbean and the USA, published in
-    the last `days_back` days, excluding individual-consultant calls and
-    anything already in the sheet (`skip_keys`). Returns [] if the search
-    stops returning parseable rows (markup or filters changed).
+    Page through one search until the date cutoff, a short page or max_pages,
+    appending kept notices to `results`. Returns False if the first page had no
+    parseable rows (markup or search contract changed).
     """
-    skip_keys = skip_keys or set()
-    cap = min(limit, MAX_NEW_ROWS) if limit is not None else MAX_NEW_ROWS
-    today = date.today()
-    cutoff = today - timedelta(days=days_back)
-    counts = {"seen": 0, "individual": 0, "past_deadline": 0, "duplicate": 0, "too_old": 0}
-    results = []
-
-    try:
-        session, token = _open_session()
-    except Exception as exc:
-        logger.error("UNGM: could not start a search session: %s", exc)
-        return []
-
-    for page in range(MAX_PAGES):
+    for page in range(max_pages):
         try:
-            html = _search_page(session, token, page, cutoff.strftime("%d-%b-%Y"))
+            html = search_page(session, token, page, cutoff.strftime("%d-%b-%Y"))
         except Exception as exc:
-            logger.error("UNGM search failed (page=%d): %s", page, exc)
-            break
+            logger.error("UNGM %s search failed (page=%d): %s", label, page, exc)
+            return True
 
         notices = _parse_rows(html)
         if not notices:
-            if page == 0:
-                logger.error(
-                    "UNGM: search returned no parseable rows on the first page -- "
-                    "the markup or the search contract changed; writing nothing this run."
-                )
-                return []
-            break
+            return page != 0
 
         reached_cutoff = False
         for notice in notices:
@@ -251,6 +265,9 @@ def fetch_opportunities(
             if published and published < cutoff:
                 reached_cutoff = True
                 break
+            if not keep(notice):
+                counts["not_multi_country"] += 1
+                continue
             if SKIP_NOTICE_TYPE_RE.search(notice["noticeType"]):
                 counts["individual"] += 1
                 continue
@@ -258,24 +275,80 @@ def fetch_opportunities(
             if deadline and deadline < today:
                 counts["past_deadline"] += 1
                 continue
-            if duplicate_key_for(notice["id"]) in skip_keys:
+            key = duplicate_key_for(notice["id"])
+            if key in skip_keys:
                 counts["duplicate"] += 1
                 continue
 
             description = _fetch_description(session, notice["id"]) if fetch_descriptions else ""
             results.append(_to_pipeline_row(notice, description))
+            skip_keys.add(key)
             if len(results) >= cap:
-                if limit is None:
+                if cap == MAX_NEW_ROWS:
                     logger.warning("UNGM: hit MAX_NEW_ROWS=%d -- stopping early", MAX_NEW_ROWS)
-                break
+                return True
 
-        if reached_cutoff or len(results) >= cap or len(notices) < PAGE_SIZE:
-            break
-    else:
-        logger.warning("UNGM: read MAX_PAGES=%d without reaching the %d-day cutoff", MAX_PAGES, days_back)
+        if reached_cutoff or len(notices) < PAGE_SIZE:
+            return True
+    logger.warning("UNGM %s: read %d pages without reaching the cutoff", label, max_pages)
+    return True
 
+
+def fetch_opportunities(
+    days_back: int = 7,
+    skip_keys: set[str] | None = None,
+    limit: int | None = None,
+    fetch_descriptions: bool = True,
+) -> list[dict]:
+    """
+    UNGM notices published in the last `days_back` days, excluding
+    individual-consultant calls and anything already in the sheet
+    (`skip_keys`):
+      1. beneficiary country in Latin America, the Caribbean or the USA;
+      2. "Multiple destinations" (global) notices in the consulting, research,
+         training and civic-affairs service segments.
+    Returns [] if the main search stops returning parseable rows (markup or
+    filters changed); a broken second pass only skips the global notices.
+    """
+    skip_keys = set(skip_keys or ())
+    cap = min(limit, MAX_NEW_ROWS) if limit is not None else MAX_NEW_ROWS
+    today = date.today()
+    cutoff = today - timedelta(days=days_back)
+    results = []
+
+    try:
+        session, token = _open_session()
+    except Exception as exc:
+        logger.error("UNGM: could not start a search session: %s", exc)
+        return []
+
+    lac = {"seen": 0, "individual": 0, "past_deadline": 0, "duplicate": 0, "not_multi_country": 0}
+    ok = _scan(_search_page, session, token, cutoff, today, MAX_PAGES, lambda n: True, skip_keys,
+               results, cap, lac, fetch_descriptions, "LAC+USA")
+    if not ok:
+        logger.error(
+            "UNGM: search returned no parseable rows on the first page -- "
+            "the markup or the search contract changed; writing nothing this run."
+        )
+        return []
+    n_lac = len(results)
     logger.info(
-        "UNGM: %d seen | %d new | %d individual-consultant | %d past deadline | %d already in sheet",
-        counts["seen"], len(results), counts["individual"], counts["past_deadline"], counts["duplicate"],
+        "UNGM LAC+USA: %d seen | %d new | %d individual-consultant | %d past deadline | %d already in sheet",
+        lac["seen"], n_lac, lac["individual"], lac["past_deadline"], lac["duplicate"],
     )
+
+    if len(results) < cap:
+        glob = {"seen": 0, "individual": 0, "past_deadline": 0, "duplicate": 0, "not_multi_country": 0}
+        global_cutoff = today - timedelta(days=min(days_back, GLOBAL_DAYS_BACK))
+        ok = _scan(_search_global_page, session, token, global_cutoff, today, MAX_GLOBAL_PAGES,
+                   lambda n: bool(MULTI_COUNTRY_RE.search(n["country"] or "")), skip_keys,
+                   results, cap, glob, fetch_descriptions, "global")
+        if not ok:
+            logger.warning("UNGM global: first page unparseable -- skipping global notices this run")
+        logger.info(
+            "UNGM global (services, multiple destinations): %d seen | %d new | %d single-country | "
+            "%d individual-consultant | %d past deadline | %d already in sheet",
+            glob["seen"], len(results) - n_lac, glob["not_multi_country"], glob["individual"],
+            glob["past_deadline"], glob["duplicate"],
+        )
     return results

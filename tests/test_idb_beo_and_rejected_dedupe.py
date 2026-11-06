@@ -95,3 +95,40 @@ def test_rejected_keys_missing_tab_or_empty_is_empty_set():
 
 def test_rejected_keys_read_error_degrades_instead_of_raising():
     assert get_rejected_duplicate_keys(FakeSheet(error=RuntimeError("quota"))) == set()
+
+
+# ── ToR document handling ────────────────────────────────────────────────────
+
+import io as _io
+import zipfile as _zipfile
+
+from email_pipeline.fetch_idb_beo import _document_kind, _extract_docx_text, _is_login_page
+
+
+def _docx(paragraphs):
+    xml = ('<?xml version="1.0"?><w:document xmlns:w="x"><w:body>'
+           + "".join(f'<w:p><w:r><w:t xml:space="preserve">{p}</w:t></w:r></w:p>' for p in paragraphs)
+           + "</w:body></w:document>")
+    buf = _io.BytesIO()
+    with _zipfile.ZipFile(buf, "w") as z:
+        z.writestr("[Content_Types].xml", "<Types/>")
+        z.writestr("word/document.xml", xml)
+    return buf.getvalue()
+
+
+def test_docx_text_is_extracted():
+    body = _docx(["TÉRMINOS DE REFERENCIA", "Objetivo: evaluar el programa &amp; su impacto"])
+    assert _extract_docx_text(body) == "TÉRMINOS DE REFERENCIA\nObjetivo: evaluar el programa & su impacto"
+    assert _extract_docx_text(b"not a zip") == ""
+
+
+def test_document_kind_by_bytes_then_header():
+    assert _document_kind(b"%PDF-1.7 ...", "application/octet-stream") == "pdf"
+    assert _document_kind(_docx(["x"]), "application/octet-stream") == "docx"
+    assert _document_kind(b"<html>", "application/vnd.openxmlformats-officedocument.wordprocessingml.document") == "docx"
+    assert _document_kind(b"<!DOCTYPE html>", "text/html; charset=utf-8") == ""
+
+
+def test_login_redirect_is_recognised():
+    assert _is_login_page("https://login.microsoftonline.com/abc/oauth2/authorize?client_id=x")
+    assert not _is_login_page("https://ezws.iadb.org/getdocument?docnum=EZIDB000820")
