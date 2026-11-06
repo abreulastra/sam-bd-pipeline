@@ -2,15 +2,19 @@
 Entry point for the email opportunity pipeline.
 
 Sources:
-  devex           Gmail alert emails from alerts@devex.com
+  devex           Gmail alert emails from alerts@devex.com          [RETIRED]
   developmentaid  DevelopmentAid's external API directly (not email --
-                  see fetch_developmentaid_api.py)
+                  see fetch_developmentaid_api.py)                  [RETIRED]
   idbbeo          IDB BEO procurement web scrape
+  worldbank       World Bank procurement API (LAC firm consulting REOIs)
   ungm            UN Global Marketplace public notice search (LAC + USA)
   cdmx            Mexico City procurement portal (consulting-type tenders only)
 
 Usage:
-    python -m src.email_pipeline.run_email_pipeline [--days 7] [--dry-run] [--limit N] [--source devex|developmentaid|idbbeo|all]
+    python -m src.email_pipeline.run_email_pipeline [--days 7] [--dry-run] [--limit N] [--source <name>|all]
+
+`all` runs every source except RETIRED_SOURCES; a retired source still runs
+when named explicitly (e.g. --source developmentaid), for tests or reactivation.
 """
 import argparse
 import logging
@@ -43,6 +47,19 @@ logging.basicConfig(
     datefmt="%Y-%m-%dT%H:%M:%S",
 )
 logger = logging.getLogger(__name__)
+
+# Subscriptions cancelled (Raúl, 2026-11-06). Coverage analysis over
+# 2026-10-07..11-06: ~1/3 of their LatAm high/medium items also arrived via
+# IDB BEO / UNGM / World Bank / SAM.gov, and C230 had not acted on any of them.
+# The code stays so a source can be re-enabled by deleting it from this set.
+RETIRED_SOURCES = {"devex", "developmentaid"}
+
+
+def source_wanted(requested: str, name: str) -> bool:
+    """True if this run should fetch `name` (`all` skips retired sources)."""
+    if requested == name:
+        return True
+    return requested == "all" and name not in RETIRED_SOURCES
 
 
 def parse_args():
@@ -127,13 +144,16 @@ def main():
     account = os.environ.get("GMAIL_ACCOUNT_EMAIL", "")
 
     logger.info("Email pipeline starting")
-    logger.info("Gmail account: %s", account)
+    if source_wanted(args.source, "devex"):
+        logger.info("Gmail account: %s", account)
+    if args.source == "all" and RETIRED_SOURCES:
+        logger.info("Retired sources (not fetched by `all`): %s", ", ".join(sorted(RETIRED_SOURCES)))
     logger.info("Days back: %d | Source: %s | Dry run: %s", args.days, args.source, args.dry_run)
 
     all_opportunities = []
 
     # ── Devex (Gmail alert emails) ───────────────────────────────────────────
-    if args.source in ("devex", "all"):
+    if source_wanted(args.source, "devex"):
         emails = fetch_emails(days=args.days, limit=args.limit, source_filter="devex")
         logger.info("Total emails fetched: %d", len(emails))
         for email in emails:
@@ -141,7 +161,7 @@ def main():
             all_opportunities.extend(opps)
 
     # ── DevelopmentAid (external API) ────────────────────────────────────────
-    if args.source in ("developmentaid", "all"):
+    if source_wanted(args.source, "developmentaid"):
         da_api_key = os.environ.get("DEVELOPMENTAID_API_KEY")
         if not da_api_key:
             logger.warning("DEVELOPMENTAID_API_KEY not set — skipping DevelopmentAid")
@@ -197,7 +217,7 @@ def main():
             logger.info("DevelopmentAid opportunities extracted: %d", len(da_raw))
 
     # ── IDB BEO web scrape ───────────────────────────────────────────────────
-    if args.source in ("idbbeo", "all"):
+    if source_wanted(args.source, "idbbeo"):
         logger.info("Fetching IDB BEO opportunities...")
         beo_raw = fetch_idb_beo()
         processed = now_utc_iso()
@@ -234,7 +254,7 @@ def main():
         logger.info("IDB BEO opportunities extracted: %d", len(beo_raw))
 
     # ── World Bank Procurement API (LAC firm consulting notices) ─────────────
-    if args.source in ("worldbank", "all"):
+    if source_wanted(args.source, "worldbank"):
         logger.info("Fetching World Bank procurement opportunities...")
         try:
             skip_keys, _ = load_pipeline_state("World Bank", sheet_url=os.environ.get("SHEET_URL"))
@@ -276,7 +296,7 @@ def main():
         logger.info("World Bank opportunities extracted: %d", len(wb_raw))
 
     # ── UNGM (UN Global Marketplace public notice search) ────────────────────
-    if args.source in ("ungm", "all"):
+    if source_wanted(args.source, "ungm"):
         logger.info("Fetching UNGM opportunities...")
         try:
             skip_keys, _ = load_pipeline_state("UNGM", sheet_url=os.environ.get("SHEET_URL"))
@@ -314,7 +334,7 @@ def main():
         logger.info("UNGM opportunities extracted: %d", len(ungm_raw))
 
     # ── CDMX (Mexico City procurement portal) ────────────────────────────────
-    if args.source in ("cdmx", "all"):
+    if source_wanted(args.source, "cdmx"):
         logger.info("Fetching CDMX opportunities...")
         try:
             skip_keys, _ = load_pipeline_state("CDMX", sheet_url=os.environ.get("SHEET_URL"))
@@ -355,7 +375,8 @@ def main():
 
     if args.dry_run:
         print(f"\n=== DRY RUN RESULTS ===")
-        print(f"Gmail account:            {account}")
+        if source_wanted(args.source, "devex"):
+            print(f"Gmail account:            {account}")
         print(f"Opportunities extracted:  {len(all_opportunities)}")
         print_preview(all_opportunities)
         print("Dry run complete — nothing written to Google Sheets.")

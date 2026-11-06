@@ -4,7 +4,7 @@
 
 ## This repo's job
 
-Ingest and deduplicate. It **appends** rows to the `Opportunities` (SAM.gov) and `Pipeline` (Devex, DevelopmentAid, IDB BEO, World Bank, UNGM, CDMX) tabs and **never deletes** them.
+Ingest and deduplicate. It **appends** rows to the `Opportunities` (SAM.gov) and `Pipeline` (IDB BEO, World Bank, UNGM, CDMX) tabs and **never deletes** them. Devex and DevelopmentAid are **retired** (subscriptions cancelled 2026-11, Raúl's decision): `RETIRED_SOURCES` in `run_email_pipeline.py` keeps them out of `--source all`; the code stays and still runs if named explicitly. Don't delete it, and don't remove them from the set without Raúl.
 
 Scoring, deleting low-fit rows and sending the email digest all belong to the private `sam-bd-agent` repo, which reads the same Google Sheet. Don't add LLM calls, fit judgments or keyword/content filtering here — that was decided deliberately: a filter at ingestion silently drops opportunities the agent would have scored as viable.
 
@@ -31,7 +31,7 @@ Related guards — keep them:
 
 `pipeline_email_daily.yml` runs `playwright install --with-deps chromium`, which doesn't support Ubuntu 26.04. GitHub moved `ubuntu-latest` to 26.04 on 2026-10-19, so every run since then died at "Install dependencies" (`Playwright does not support chromium on ubuntu26.04-x64`) — before any of our code ran, so no in-app alert could fire. The pipeline reads a 7-day window (`--days 7`), so a fixed run recovers what was missed as long as it happens within a week of the last good run. Don't switch back to `ubuntu-latest` until Playwright is upgraded to a release that supports the newer image. Workflows that don't use Playwright (`collect.yml`, `keep-alive.yml`) can stay on `ubuntu-latest`.
 
-## DevelopmentAid has two limits
+## DevelopmentAid has two limits (retired source — only matters if re-enabled)
 
 `src/email_pipeline/fetch_developmentaid_api.py`
 
@@ -50,7 +50,7 @@ Related guards — keep them:
 ## Per-source notes
 
 - **IDB BEO** (`fetch_idb_beo.py`): the ToR PDFs need session cookies from the same Playwright session that scraped the table, so its PDF reading has to stay here — it can't move to `sam-bd-agent` the way SAM.gov attachment reading did. The table is **paginated** (20 rows/page; 27 in Oct 2026) and `_scrape_all_pages` follows the pager. The pager items are plain `<li>`s with no `<a>` — click `li.pager__item--next`, which is removed from the DOM on the last page. Don't go back to `wait_until="networkidle"` for the first load: it timed out locally on this site; wait for the table selector instead.
-- **Devex**: no API; metadata only, parsed from alert emails. Not developing it further is a decision (2026-09), not an oversight.
+- **Devex** (retired 2026-11): no API; metadata only, parsed from alert emails.
 - **SAM.gov**: attachments are passed on as `resourceLinks` (pipe-separated URLs); `sam-bd-agent` downloads and reads them. The pipeline re-checks rows the agent scored `high`/`medium` (`recheck_high_priority` in `src/main.py`) so amended notices get re-scored; when one becomes an Award Notice it only records awardee/amount/date — awards are not emailed.
 - **World Bank** (`fetch_worldbank.py`): the API silently ignores most params (`procurement_category`, `srt`, `order`, date ranges) and has no `publ_date` — only `*_exact` filters and `rows`/`os` paging work (newest-first by `noticedate`). The 2026-09-14 version relied on the ignored ones and pulled 26k archive rows. Keep the tripwire (non-CS-REOI notice → write nothing), the page/row caps, and the date cutoff; test changes with `--source worldbank --dry-run` first. Scope is LAC firm consulting REOIs only (Raúl's choice, 2026-09-16).
 - **UNGM** (`fetch_ungm.py`): the search needs a session cookie + `__RequestVerificationToken` from `/Public/Notice`, sent as the `RequestVerificationToken` header with `Origin`/`X-Requested-With`; without them it's a 400. `PageSize` is server-pinned at 15, so it pages. The response is **HTML rows, not JSON** — keep the tripwire (first page unparseable → write nothing), the page/row caps, and the individual-consultant filter. Countries are filtered server-side with ids from the search form's `selNoticeCountry` list (LAC + USA, captured 2026-10-05); re-capture them if UNGM renumbers.

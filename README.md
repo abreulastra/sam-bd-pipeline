@@ -2,7 +2,7 @@
 
 Automated business development pipeline for **C230 Consulting Group**.
 
-Pulls federal contracting opportunities from **SAM.gov**, Devex email alerts, **DevelopmentAid**'s external API, IDB BEO's procurement site, the **World Bank** procurement API, the **UN Global Marketplace** (UNGM), and **Mexico City's** procurement portal, filters and de-duplicates them, and writes results to a shared **Google Sheet** for daily review.
+Pulls federal contracting opportunities from **SAM.gov**, IDB BEO's procurement site, the **World Bank** procurement API, the **UN Global Marketplace** (UNGM), and **Mexico City's** procurement portal, filters and de-duplicates them, and writes results to a shared **Google Sheet** for daily review. (Devex and DevelopmentAid were sources until 2026-11 — see [Retired sources](#retired-sources-devex-and-developmentaid).)
 
 Opportunity scoring and analysis is handled separately by the [`sam-bd-agent`](https://github.com/abreulastra/sam-bd-agent) repository.
 
@@ -13,8 +13,6 @@ Opportunity scoring and analysis is handled separately by the [`sam-bd-agent`](h
 | Source | Tab | Schedule |
 |---|---|---|
 | SAM.gov Opportunities API | `Opportunities` | Weekdays, 11:15 AM UTC |
-| Devex email alerts | `Pipeline` | Weekdays, 12:00 PM UTC |
-| DevelopmentAid external API | `Pipeline` | Weekdays, 12:00 PM UTC |
 | IDB BEO procurement scrape | `Pipeline` | Weekdays, 12:00 PM UTC |
 | World Bank procurement API (LAC firm consulting notices) | `Pipeline` | Weekdays, 12:00 PM UTC |
 | UNGM public notice search (LAC + USA) | `Pipeline` | Weekdays, 12:00 PM UTC |
@@ -29,9 +27,8 @@ SAM.gov API  ──────────────────→  src/main
                                         ↓
                                Google Sheet: Opportunities tab
 
-Gmail (Devex) ─────────────────┐
-DevelopmentAid API ─────────────┼→  src/email_pipeline/
-IDB BEO web scrape ─────────────┤         ↓
+IDB BEO web scrape ─────────────┬→  src/email_pipeline/
+                                │         ↓
 World Bank API ─────────────────┤
 UNGM notice search ─────────────┤
 CDMX procurement portal ────────┘
@@ -125,7 +122,7 @@ python -m src.email_pipeline.run_email_pipeline --help
 | `--days` | `7` | Days back to search (Gmail search window / DevelopmentAid `postedFrom`) |
 | `--dry-run` | off | Print results without writing to Sheets |
 | `--limit` | none | Max emails to process (Devex) / max *new* opportunities to fully fetch (DevelopmentAid); IDB BEO ignores it |
-| `--source` | `all` | Filter: `devex`, `developmentaid`, `idbbeo`, `worldbank`, `ungm`, `cdmx`, or `all` |
+| `--source` | `all` | Filter: `idbbeo`, `worldbank`, `ungm`, `cdmx`, or `all`. The retired `devex` and `developmentaid` only run when named explicitly. |
 
 ---
 
@@ -279,7 +276,15 @@ This deliberately does **not** skip rows whose stored deadline has already passe
 
 ---
 
-## DevelopmentAid API
+## Retired sources: Devex and DevelopmentAid
+
+Both subscriptions were cancelled in 2026-11 (Raúl's decision). A coverage analysis over 2026-10-07..11-06 found that about a third of their Latin America high/medium opportunities also arrived through IDB BEO, UNGM, World Bank or SAM.gov, and C230 had not acted on any of them. What's lost is mainly IDB procurement plans and country-executed loans, World Bank *Bank-executed* work, global UN notices, and donors with no direct source (governments, EU, GIZ, GEF, GCF, CABEI, JICA, CAF).
+
+`RETIRED_SOURCES` in `src/email_pipeline/run_email_pipeline.py` keeps them out of `--source all`. The code is still here: naming one explicitly (`--source developmentaid`) still runs it, and deleting it from the set re-enables it. Rows already in the sheet were left alone. The Gmail (`GMAIL_*`) and `DEVELOPMENTAID_API_KEY` secrets are now unused.
+
+The rest of this section describes how DevelopmentAid worked while it was live.
+
+### DevelopmentAid API (retired)
 
 DevelopmentAid opportunities used to arrive as forwarded alert emails, parsed from inconsistent HTML layouts. As of 2026-08, this pipeline instead calls DevelopmentAid's own external API directly (`fetch_developmentaid_api.py`) — member-company access, authenticated via `X-API-KEY`. `parse_developmentaid.py` (the old email parser) is left in the repo but no longer called.
 
