@@ -27,9 +27,9 @@ Related guards — keep them:
 - `ensure_headers` (`src/sheets_client.py`) writes the whole header row in one atomic update.
 - Both workflows have a `concurrency:` block so a scheduled run can't overlap a manual one.
 
-## Workflows that install Playwright are pinned to `ubuntu-24.04`
+## Workflows that install Playwright need a Playwright that supports the runner image
 
-`pipeline_email_daily.yml` runs `playwright install --with-deps chromium`, which doesn't support Ubuntu 26.04. GitHub moved `ubuntu-latest` to 26.04 on 2026-10-19, so every run since then died at "Install dependencies" (`Playwright does not support chromium on ubuntu26.04-x64`) — before any of our code ran, so no in-app alert could fire. The pipeline reads a 7-day window (`--days 7`), so a fixed run recovers what was missed as long as it happens within a week of the last good run. Don't switch back to `ubuntu-latest` until Playwright is upgraded to a release that supports the newer image. Workflows that don't use Playwright (`collect.yml`, `keep-alive.yml`) can stay on `ubuntu-latest`.
+`ubuntu-latest` moved to Ubuntu 26.04 on 2026-10-19. With Playwright 1.50/1.58, `playwright install --with-deps chromium` failed there (`Playwright does not support chromium on ubuntu26.04-x64`) and every run died at "Install dependencies" — before any of our code ran, so no in-app alert could fire. The workflow was pinned to `ubuntu-24.04` until Playwright was upgraded (1.64.1; 1.62+ support 26.04), then moved back to `ubuntu-latest`. If GitHub moves `ubuntu-latest` again and the install step fails, pin the runner to the last working image first, then upgrade Playwright.
 
 ## DevelopmentAid has two limits (retired source — only matters if re-enabled)
 
